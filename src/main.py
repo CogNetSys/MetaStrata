@@ -1,4 +1,4 @@
-# simulation_app.py
+# src/main.py
 
 import os
 import random
@@ -341,7 +341,7 @@ class StepRequest(BaseModel):
 
 @app.post("/reset", dependencies=[Depends(verify_auth_token)])
 @limiter.limit("10/minute")  # Example rate limit for /reset
-async def reset_simulation():
+async def reset_simulation(request: Request):
     try:
         # Clear specific tables
         supabase.table("agents").delete().neq("id", -1).execute()
@@ -360,7 +360,7 @@ async def reset_simulation():
 
 @app.post("/start", dependencies=[Depends(verify_auth_token)])
 @limiter.limit("10/minute")  # Example rate limit for /start
-async def start_simulation():
+async def start_simulation(request: Request):
     try:
         status = get_simulation_status()
         if status["status"] == "running":
@@ -434,7 +434,7 @@ async def stop_simulation():
 
 # ---------------------- Run the App ----------------------
 
-# To run the app locally, use the command:
-# uvicorn simulation_app:app --host 0.0.0.0 --port 8000
+# To run the app locally for testing, use the command:
+# uvicorn src.main:app --host 0.0.0.0 --port 8000
 
 # On Vercel, deploy this script as a serverless function following Vercel's deployment guidelines.

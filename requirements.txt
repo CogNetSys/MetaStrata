@@ -1,0 +1,6 @@
+fastapi
+supabase
+httpx
+pydantic
+python-dotenv
+slowapi
