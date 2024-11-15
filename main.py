@@ -5,7 +5,7 @@ import random
 import json
 import asyncio
 from typing import List, Dict, Optional
-from fastapi import FastAPI, HTTPException, Depends, Header, Request
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from supabase import create_client, Client
@@ -25,10 +25,9 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_ENDPOINT = os.getenv("GROQ_API_ENDPOINT")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-AUTH_TOKEN = os.getenv("AUTH_TOKEN")
 E2B_API_KEY = os.getenv("E2B_API_KEY")  # Not used in current implementation
 
-if not all([SUPABASE_URL, SUPABASE_KEY, GROQ_API_ENDPOINT, GROQ_API_KEY, AUTH_TOKEN]):
+if not all([SUPABASE_URL, SUPABASE_KEY, GROQ_API_ENDPOINT, GROQ_API_KEY]):
     raise EnvironmentError("One or more required environment variables are missing.")
 
 # Initialize Supabase client
@@ -63,11 +62,7 @@ LLM_TEMPERATURE = 0.7
 
 # ---------------------- Security Dependency ----------------------
 
-async def verify_auth_token(x_auth_token: str = Header(...)):
-    if x_auth_token != AUTH_TOKEN:
-        logger.warning("Unauthorized access attempt with token: %s", x_auth_token)
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return x_auth_token
+# Removed authentication token and related verification
 
 # ---------------------- Prompt Templates ----------------------
 
@@ -342,7 +337,7 @@ class StepRequest(BaseModel):
 
 # ---------------------- API Endpoints ----------------------
 
-@app.post("/reset", dependencies=[Depends(verify_auth_token)])
+@app.post("/reset")
 @limiter.limit("10/minute")  # Example rate limit for /reset
 async def reset_simulation(request: Request):
     try:
@@ -361,7 +356,7 @@ async def reset_simulation(request: Request):
         logger.error("Failed to reset simulation: %s", e)
         raise HTTPException(status_code=500, detail="Failed to reset simulation.")
 
-@app.post("/start", dependencies=[Depends(verify_auth_token)])
+@app.post("/start")
 @limiter.limit("10/minute")  # Example rate limit for /start
 async def start_simulation(request: Request):
     try:
@@ -381,7 +376,7 @@ async def start_simulation(request: Request):
         logger.error("Failed to start simulation: %s", e)
         raise HTTPException(status_code=500, detail="Failed to start simulation.")
 
-@app.post("/step", dependencies=[Depends(verify_auth_token)])
+@app.post("/step")
 @limiter.limit("60/minute")  # Example rate limit for /step
 async def perform_steps(request: StepRequest):
     try:
@@ -419,7 +414,7 @@ async def perform_steps(request: StepRequest):
         logger.error("Failed to perform steps: %s", e)
         raise HTTPException(status_code=500, detail="Failed to perform steps.")
 
-@app.post("/stop", dependencies=[Depends(verify_auth_token)])
+@app.post("/stop")
 @limiter.limit("10/minute")  # Example rate limit for /stop
 async def stop_simulation():
     try:
