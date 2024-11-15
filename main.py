@@ -1,5 +1,3 @@
-# src/main.py
-
 import os
 import random
 import json
@@ -15,19 +13,25 @@ import logging
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from http.server import BaseHTTPRequestHandler
 
 load_dotenv()
 
 # ---------------------- Configuration and Initialization ----------------------
 
 # Load environment variables
+PROTECTION_BYPASS_KEY = os.getenv("PROTECTION_BYPASS_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-GROQ_API_ENDPOINT = os.getenv("GROQ_API_ENDPOINT")
+SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-E2B_API_KEY = os.getenv("E2B_API_KEY")  # Not used in current implementation
+GROQ_API_ENDPOINT = os.getenv("GROQ_API_ENDPOINT")
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
+REDIS_ENDPOINT = os.getenv("REDIS_ENDPOINT")
+AUTH_TOKEN = os.getenv("AUTH_TOKEN")
+E2B_API_KEY = os.getenv("E2B_API_KEY")
 
-if not all([SUPABASE_URL, SUPABASE_KEY, GROQ_API_ENDPOINT, GROQ_API_KEY]):
+if not all([SUPABASE_URL, SUPABASE_KEY, GROQ_API_ENDPOINT, GROQ_API_KEY, PROTECTION_BYPASS_KEY]):
     raise EnvironmentError("One or more required environment variables are missing.")
 
 # Initialize Supabase client
@@ -60,9 +64,30 @@ LLM_MODEL = "llama-3.2-90b-vision-preview"
 LLM_MAX_TOKENS = 2048  # As per user request
 LLM_TEMPERATURE = 0.7
 
-# ---------------------- Security Dependency ----------------------
+# ---------------------- Middleware for Authentication ----------------------
 
-# Removed authentication token and related verification
+async def verify_authentication(request: Request):
+    # Get Vercel Authentication token (if provided) and bypass key
+    auth_header = request.headers.get("Authorization")
+    bypass_key = request.headers.get("X-Bypass-Key")
+
+    # Check for bypass key
+    if bypass_key == PROTECTION_BYPASS_KEY:
+        return True
+
+    # Check Vercel authentication header
+    if not auth_header or not auth_header.startswith("Bearer "):
+        logger.warning("Unauthorized access attempt.")
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Extract the token and validate
+    token = auth_header.split(" ")[1]
+    # Here you would validate the Vercel token (e.g., call an API endpoint)
+    if token != "vercel-valid-token":  # Replace with actual validation logic
+        logger.warning("Invalid Vercel token.")
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    return True
 
 # ---------------------- Prompt Templates ----------------------
 

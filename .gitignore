@@ -12,4 +12,9 @@ MetaStrata-venv/
 
 # Others
 *.log
+
+# Vercel
 .vercel
+
+# Environment variables
+.env
