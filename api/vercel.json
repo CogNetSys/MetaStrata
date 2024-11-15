@@ -2,8 +2,7 @@
   "version": 2,
   "github": {
     "enabled": true,
-    "autoJobCancelation": true,  // Cancels ongoing redundant deployments
-    "silent": true               // Suppresses extra deployment notifications
+    "autoJobCancelation": true
   },
   "builds": [
     {
