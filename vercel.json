@@ -1,19 +1,15 @@
 {
   "version": 2,
-  "github": {
-    "enabled": true,
-    "autoJobCancelation": true
-  },
   "builds": [
     {
-      "src": "api/**/*.js",
-      "use": "@vercel/node"
+      "src": "*.py",
+      "use": "@vercel/python"
     }
   ],
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "/api/$1"
+      "dest": "main.py"
     }
   ]
 }
