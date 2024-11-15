@@ -66,6 +66,15 @@ formatter = logging.Formatter(
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
+# Simulation Configuration
+GRID_SIZE = 30
+NUM_AGENTS = 10
+MAX_STEPS = 100
+CHEBYSHEV_DISTANCE = 5
+LLM_MODEL = "llama-3.2-90b-vision-preview"
+LLM_MAX_TOKENS = 2048
+LLM_TEMPERATURE = 0.7
+
 # ---------------------- Middleware for Authentication ----------------------
 
 async def verify_authentication(request: Request):
@@ -196,9 +205,11 @@ async def send_llm_request(prompt: str) -> Optional[Dict]:
             return None
 
 def initialize_agents() -> List[Dict]:
+    logger.info("Initializing agents...")
     agents = []
     try:
-        supabase.table("agents").delete().neq("id", -1).execute()  # Clear existing agents
+        logger.info("Clearing existing agents...")
+        supabase.table("agents").delete().neq("id", -1).execute()
         for i in range(NUM_AGENTS):
             agent = {
                 "id": i,
@@ -208,7 +219,7 @@ def initialize_agents() -> List[Dict]:
                 "memory": "No memory"
             }
             agents.append(agent)
-            # Insert into Supabase
+            logger.info(f"Inserting agent {agent['id']} into Supabase...")
             supabase.table("agents").insert({
                 "id": agent["id"],
                 "name": agent["name"],
@@ -216,11 +227,9 @@ def initialize_agents() -> List[Dict]:
                 "y": agent["y"],
                 "memory": agent["memory"]
             }).execute()
-        logger.info("Initialized Agents:")
-        for agent in agents:
-            logger.info(agent)
+        logger.info("Agents initialized successfully.")
     except Exception as e:
-        logger.error("Failed to initialize agents: %s", e)
+        logger.error(f"Failed to initialize agents: {e}")
         raise
     return agents
 
@@ -389,19 +398,18 @@ async def start_simulation(request: Request):
     try:
         status = get_simulation_status()
         if status["status"] == "running":
-            logger.warning("Attempted to start simulation, but it is already running.")
+            logger.warning("Simulation already running.")
             raise HTTPException(status_code=400, detail="Simulation is already running.")
-        # Initialize agents
+        logger.info("Initializing agents...")
         initialize_agents()
-        # Update simulation status
         update_simulation_status(current_step=0, status="running")
-        logger.info("Simulation has been started.")
+        logger.info("Simulation started successfully.")
         return JSONResponse(content={"status": "Simulation started successfully."})
     except HTTPException as he:
         raise he
     except Exception as e:
-        logger.error("Failed to start simulation: %s", e)
-        raise HTTPException(status_code=500, detail="Failed to start simulation.")
+        logger.error(f"Failed to start simulation: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to start simulation: {str(e)}")
 
 @app.post("/step")
 @limiter.limit("60/minute")  # Example rate limit for /step
