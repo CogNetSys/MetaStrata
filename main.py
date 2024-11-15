@@ -411,15 +411,18 @@ async def start_simulation(request: Request):
         logger.error(f"Failed to start simulation: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to start simulation: {str(e)}")
 
+from fastapi import Body  # Import for parsing request body directly
+
 @app.post("/step")
 @limiter.limit("60/minute")  # Example rate limit for /step
-async def perform_steps(request: Request):
+async def perform_steps(request: Request, step_request: StepRequest = Body(...)):  # Add `request`
     try:
         status = get_simulation_status()
         if status["status"] != "running":
             logger.warning("Attempted to perform steps, but simulation is not running.")
             raise HTTPException(status_code=400, detail="Simulation is not running.")
-        steps_to_perform = request.steps
+
+        steps_to_perform = step_request.steps  # Parse `steps` from the request body
         if steps_to_perform < 1:
             logger.warning("Invalid number of steps requested: %s", steps_to_perform)
             raise HTTPException(status_code=400, detail="Number of steps must be at least 1.")
@@ -428,6 +431,7 @@ async def perform_steps(request: Request):
             if steps_to_perform <= 0:
                 logger.warning("Maximum number of steps reached.")
                 raise HTTPException(status_code=400, detail="Maximum number of steps reached.")
+
         for _ in range(steps_to_perform):
             current_step = get_simulation_status()["current_step"] + 1
             await perform_step(current_step)
@@ -436,6 +440,7 @@ async def perform_steps(request: Request):
                 update_simulation_status(current_step=current_step, status="stopped")
                 logger.info("Maximum number of steps reached. Simulation stopped.")
                 break
+
         final_step = get_simulation_status()["current_step"]
         logger.info("Performed %s step(s). Current step: %s.", steps_to_perform, final_step)
         return JSONResponse(content={
