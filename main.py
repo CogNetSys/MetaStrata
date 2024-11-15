@@ -15,21 +15,32 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from http.server import BaseHTTPRequestHandler
 
+# Load environment variables
 load_dotenv()
 
 # ---------------------- Configuration and Initialization ----------------------
 
-# Load environment variables
-PROTECTION_BYPASS_KEY = os.getenv("PROTECTION_BYPASS_KEY")
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_API_ENDPOINT = os.getenv("GROQ_API_ENDPOINT")
-REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
-REDIS_ENDPOINT = os.getenv("REDIS_ENDPOINT")
-AUTH_TOKEN = os.getenv("AUTH_TOKEN")
-E2B_API_KEY = os.getenv("E2B_API_KEY")
+# Load environment variables with fallbacks for unused variables
+PROTECTION_BYPASS_KEY = os.getenv("PROTECTION_BYPASS_KEY", "")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_API_ENDPOINT = os.getenv("GROQ_API_ENDPOINT", "")
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
+REDIS_ENDPOINT = os.getenv("REDIS_ENDPOINT", "")
+AUTH_TOKEN = os.getenv("AUTH_TOKEN", "")
+E2B_API_KEY = os.getenv("E2B_API_KEY", "")
+
+# Log all loaded variables for debugging
+logger = logging.getLogger("environment_logger")
+logger.setLevel(logging.INFO)
+print(
+    f"Loaded Variables: "
+    f"SUPABASE_URL={SUPABASE_URL}, "
+    f"SUPABASE_KEY={SUPABASE_KEY}, "
+    f"PROTECTION_BYPASS_KEY={PROTECTION_BYPASS_KEY}"
+)
 
 if not all([SUPABASE_URL, SUPABASE_KEY, GROQ_API_ENDPOINT, GROQ_API_KEY, PROTECTION_BYPASS_KEY]):
     raise EnvironmentError("One or more required environment variables are missing.")
@@ -54,15 +65,6 @@ formatter = logging.Formatter(
 )
 handler.setFormatter(formatter)
 logger.addHandler(handler)
-
-# Simulation Configuration
-GRID_SIZE = 30
-NUM_AGENTS = 10
-MAX_STEPS = 100
-CHEBYSHEV_DISTANCE = 5
-LLM_MODEL = "llama-3.2-90b-vision-preview"
-LLM_MAX_TOKENS = 2048  # As per user request
-LLM_TEMPERATURE = 0.7
 
 # ---------------------- Middleware for Authentication ----------------------
 
