@@ -378,7 +378,7 @@ async def start_simulation(request: Request):
 
 @app.post("/step")
 @limiter.limit("60/minute")  # Example rate limit for /step
-async def perform_steps(request: StepRequest):
+async def perform_steps(request: Request):
     try:
         status = get_simulation_status()
         if status["status"] != "running":
