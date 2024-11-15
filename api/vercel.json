@@ -1,4 +1,20 @@
 {
-    "version": 2
-  }
-  
+  "version": 2,
+  "github": {
+    "enabled": true,
+    "autoJobCancelation": true,  // Cancels ongoing redundant deployments
+    "silent": true               // Suppresses extra deployment notifications
+  },
+  "builds": [
+    {
+      "src": "api/**/*.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "/api/$1"
+    }
+  ]
+}
