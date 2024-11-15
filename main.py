@@ -9,11 +9,14 @@ from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from supabase import create_client, Client
+from dotenv import load_dotenv
 import httpx
 import logging
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+
+load_dotenv()
 
 # ---------------------- Configuration and Initialization ----------------------
 
