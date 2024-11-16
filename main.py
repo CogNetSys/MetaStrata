@@ -18,7 +18,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_API_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
-REDIS_ENDPOINT = os.getenv("REDIS_ENDPOINT")
+REDIS_ENDPOINT = "cute-crawdad-25113.upstash.io"
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
 
 # Simulation Configuration
