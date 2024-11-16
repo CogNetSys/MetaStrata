@@ -32,7 +32,14 @@ LLM_TEMPERATURE = 0.7
 REQUEST_DELAY = 1.0  # Delay in seconds between requests to control pace
 
 # Redis & Supabase Initialization
-redis = Redis(host=REDIS_ENDPOINT, password=REDIS_PASSWORD)
+# Initialize Redis client with TLS
+redis = Redis(
+    host="cute-crawdad-25113.upstash.io",
+    port=6379,
+    password=os.getenv("REDIS_PASSWORD"),
+    decode_responses=True,
+    ssl=True  # Enable SSL/TLS
+)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # FastAPI Application
@@ -95,11 +102,22 @@ async def send_llm_request(prompt):
         return response.json()
 
 async def initialize_agents():
+    # Clear dependent records in the "movements" table
+    logger.info("Deleting dependent records from 'movements' table.")
+    await supabase.table("movements").delete().neq("agent_id", -1).execute()
+    # Clear the "agents" table
+    logger.info("Deleting records from 'agents' table.")
+    await supabase.table("agents").delete().neq("id", -1).execute()
+
+    # Initialize new agents
+    logger.info("Creating new agents.")
     agents = [{"id": i, "x": random.randint(0, GRID_SIZE - 1), "y": random.randint(0, GRID_SIZE - 1), "memory": ""} for i in range(NUM_AGENTS)]
+    await supabase.table("agents").insert(agents).execute()
+
+    # Update Redis with agent data
     for agent in agents:
         await redis.hset(f"agent:{agent['id']}", mapping=agent)
-    await supabase.table("agents").delete().neq("id", -1).execute()
-    await supabase.table("agents").insert(agents).execute()
+    logger.info("Agents initialized successfully.")
     return agents
 
 async def fetch_nearby_messages(agent, agents):
@@ -122,8 +140,8 @@ async def paced_request_execution(tasks):
 @app.post("/reset")
 async def reset_simulation():
     await redis.flushdb()
-    await initialize_agents()
-    return JSONResponse({"status": "Simulation reset successfully."})
+    agents = await initialize_agents()
+    return JSONResponse({"status": "Simulation reset successfully.", "agents": agents})
 
 @app.post("/start")
 async def start_simulation():
