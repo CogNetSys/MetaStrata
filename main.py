@@ -1,478 +1,167 @@
 import os
 import random
-import json
 import asyncio
-from typing import List, Dict, Optional
-from fastapi import FastAPI, HTTPException, Depends, Request
+from typing import List, Dict
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from supabase import create_client, Client
 from dotenv import load_dotenv
+from redis.asyncio import Redis
+from supabase import create_client, Client
 import httpx
 import logging
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
-from http.server import BaseHTTPRequestHandler
 
-# Load environment variables
 load_dotenv()
 
-# ---------------------- Configuration and Initialization ----------------------
-
-# Load environment variables with fallbacks for unused variables
-PROTECTION_BYPASS_KEY = os.getenv("PROTECTION_BYPASS_KEY", "")
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
-SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY", "")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_API_ENDPOINT = os.getenv("GROQ_API_ENDPOINT", "")
-REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
-REDIS_ENDPOINT = os.getenv("REDIS_ENDPOINT", "")
-AUTH_TOKEN = os.getenv("AUTH_TOKEN", "")
-E2B_API_KEY = os.getenv("E2B_API_KEY", "")
-
-# Log all loaded variables for debugging
-logger = logging.getLogger("environment_logger")
-logger.setLevel(logging.INFO)
-print(
-    f"Loaded Variables: "
-    f"SUPABASE_URL={SUPABASE_URL}, "
-    f"SUPABASE_KEY={SUPABASE_KEY}, "
-    f"PROTECTION_BYPASS_KEY={PROTECTION_BYPASS_KEY}"
-)
-
-if not all([SUPABASE_URL, SUPABASE_KEY, GROQ_API_ENDPOINT, GROQ_API_KEY, PROTECTION_BYPASS_KEY]):
-    raise EnvironmentError("One or more required environment variables are missing.")
-
-# Initialize Supabase client
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# Initialize FastAPI app
-app = FastAPI(title="LLM-Based Multi-Agent Simulation")
-
-# Initialize Rate Limiter (Moderate limit: 60 requests per minute)
-limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
-# Setup logging
-logger = logging.getLogger("simulation_app")
-logger.setLevel(logging.INFO)
-handler = logging.StreamHandler()
-formatter = logging.Formatter(
-    '[%(asctime)s] [%(levelname)s] %(message)s'
-)
-handler.setFormatter(formatter)
-logger.addHandler(handler)
+# Environment Variables
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_API_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
+REDIS_ENDPOINT = os.getenv("REDIS_ENDPOINT")
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
 
 # Simulation Configuration
-GRID_SIZE = 30
+GRID_SIZE = 30  # Updated to 30x30 grid
 NUM_AGENTS = 10
 MAX_STEPS = 100
 CHEBYSHEV_DISTANCE = 5
 LLM_MODEL = "llama-3.2-90b-vision-preview"
 LLM_MAX_TOKENS = 2048
 LLM_TEMPERATURE = 0.7
+REQUEST_DELAY = 1.0  # Delay in seconds between requests to control pace
 
-# ---------------------- Middleware for Authentication ----------------------
+# Redis & Supabase Initialization
+redis = Redis(host=REDIS_ENDPOINT, password=REDIS_PASSWORD)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-async def verify_authentication(request: Request):
-    # Get Vercel Authentication token (if provided) and bypass key
-    auth_header = request.headers.get("Authorization")
-    bypass_key = request.headers.get("X-Bypass-Key")
+# FastAPI Application
+app = FastAPI()
 
-    # Check for bypass key
-    if bypass_key == PROTECTION_BYPASS_KEY:
-        return True
+# Logging Configuration
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("simulation_app")
 
-    # Check Vercel authentication header
-    if not auth_header or not auth_header.startswith("Bearer "):
-        logger.warning("Unauthorized access attempt.")
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    # Extract the token and validate
-    token = auth_header.split(" ")[1]
-    # Here you would validate the Vercel token (e.g., call an API endpoint)
-    if token != "vercel-valid-token":  # Replace with actual validation logic
-        logger.warning("Invalid Vercel token.")
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    return True
-
-# ---------------------- Prompt Templates ----------------------
-
-GRID_DESCRIPTION = (
-    "This simulation operates on a 30x30 grid. Agents interact within this environment based "
-    "on their positions and interactions with other agents."
-)
+# Prompt Templates
+GRID_DESCRIPTION = "The field size is 30 x 30 with periodic boundary conditions, and there are a total of 10 entities. You are free to move around the field and converse with other entities."
 
 MESSAGE_GENERATION_PROMPT = """
-[INST]  
-You are agent{agentId} at position ({x}, {y}).
-
-**Description of the Simulation:**  
-{grid_description}
-
-Consider your surroundings, recent experiences, and any memories or thoughts that may be relevant to share with others nearby. If there is something you feel would benefit others or help advance your own interests, decide whether to send a message to agents within reach. Reflect on the potential impact of your message and the purpose behind sharing it.  
-[/INST]
+[INST]
+You are entity{agentId} at position ({x}, {y}). {grid_description} You have a summary memory of the situation so far: {memory}. You received messages from the surrounding entities: {messages}. Based on the above, you send a message to the surrounding entities. Your message will reach entities up to distance {distance} away. What message do you send? [/INST]
 """
 
 MEMORY_GENERATION_PROMPT = """
-[INST]  
-You are agent{agentId} at position ({x}, {y}).
-
-**Description of the Simulation:**  
-{grid_description}
-
-Reflect on your recent experiences and interactions, considering what stands out or holds personal significance. Choose whether to remember certain details or let them fade, prioritizing what you believe might be meaningful for your future decisions or goals. Decide freely what, if anything, you wish to keep in memory.  
-[/INST]
+[INST]
+You are entity{agentId} at position ({x}, {y}). {grid_description} You have a summary memory of the situation so far: {memory}. You received messages from the surrounding entities: {messages}. Based on the above, summarize the situation you and the other entities have been in so far for you to remember. [/INST]
 """
 
 MOVEMENT_GENERATION_PROMPT = """
-[INST]  
-You are agent{agentId} at position ({x}, {y}).
-
-**Description of the Simulation:**  
-{grid_description}
-
-Consider your current location, your recent experiences, and any personal goals you may have. Reflect on whether moving is necessary to further your aims or if remaining where you are might be preferable. If you choose to move, select one of the following directions: "x+1", "x-1", "y+1", "y-1". If you see no reason to move, simply remain where you are.  
-[/INST]
+[INST]
+You are entity{agentId} at position ({x}, {y}). {grid_description} You have a summary memory of the situation so far: {memory}. Based on the above, what is your next move command? Choose only one of the following: ["x+1", "x-1", "y+1", "y-1", "stay"] [/INST]
 """
 
-# ---------------------- Helper Functions ----------------------
+# Data Models
+class StepRequest(BaseModel):
+    steps: int
 
-def chebyshev_distance(x1: int, y1: int, x2: int, y2: int) -> int:
+# Helper Functions
+def chebyshev_distance(x1, y1, x2, y2):
     dx = min(abs(x1 - x2), GRID_SIZE - abs(x1 - x2))
     dy = min(abs(y1 - y2), GRID_SIZE - abs(y1 - y2))
     return max(dx, dy)
 
-def get_nearby_agents(agent: Dict, agents: List[Dict]) -> List[Dict]:
-    nearby = []
-    for other in agents:
-        if other['id'] == agent['id']:
-            continue
-        distance = chebyshev_distance(agent['x'], agent['y'], other['x'], other['y'])
-        if distance <= CHEBYSHEV_DISTANCE:
-            nearby.append(other)
-    return nearby
-
-def construct_prompt(template: str, agent: Dict) -> str:
+def construct_prompt(template, agent, messages):
+    messages_str = "\n".join(messages)
     return template.format(
-        agentId=agent['id'],
-        x=agent['x'],
-        y=agent['y'],
-        grid_description=GRID_DESCRIPTION
+        agentId=agent["id"], x=agent["x"], y=agent["y"],
+        grid_description=GRID_DESCRIPTION, memory=agent.get("memory", ""),
+        messages=messages_str, distance=CHEBYSHEV_DISTANCE
     )
 
-def parse_llm_response(response: str) -> Dict:
-    try:
-        parsed = json.loads(response)
-        return {
-            "message": parsed.get("message", ""),
-            "memory": parsed.get("memory", ""),
-            "movement": parsed.get("movement", "stay")
-        }
-    except json.JSONDecodeError:
-        logger.error("Failed to parse LLM response: %s", response)
-        return {
-            "message": "",
-            "memory": "",
-            "movement": "stay"
-        }
-
-async def send_llm_request(prompt: str) -> Optional[Dict]:
+async def send_llm_request(prompt):
     headers = {
-        'Content-Type': 'application/json',
-        'Authorization': f'Bearer {GROQ_API_KEY}'
+        'Authorization': f'Bearer {GROQ_API_KEY}',
+        'Content-Type': 'application/json'
     }
     body = {
         "model": LLM_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": LLM_MAX_TOKENS
+        "max_tokens": LLM_MAX_TOKENS,
+        "temperature": LLM_TEMPERATURE
     }
     async with httpx.AsyncClient() as client:
-        try:
-            response = await client.post(GROQ_API_ENDPOINT, headers=headers, json=body)
-            response.raise_for_status()
-            data = response.json()
-            # Adjust parsing based on Groq Cloud's actual response structure
-            # Assuming similar to OpenAI's API for demonstration
-            llm_output = data.get('choices', [{}])[0].get('message', {}).get('content', '')
-            return parse_llm_response(llm_output)
-        except httpx.HTTPError as e:
-            logger.error("LLM Request failed: %s", e)
-            return None
+        response = await client.post(GROQ_API_ENDPOINT, headers=headers, json=body)
+        response.raise_for_status()
+        return response.json()
 
-def initialize_agents() -> List[Dict]:
-    logger.info("Initializing agents...")
-    agents = []
-    try:
-        logger.info("Clearing existing agents...")
-        supabase.table("agents").delete().neq("id", -1).execute()
-        for i in range(NUM_AGENTS):
-            agent = {
-                "id": i,
-                "name": f"agent{i}",
-                "x": random.randint(0, GRID_SIZE - 1),
-                "y": random.randint(0, GRID_SIZE - 1),
-                "memory": "No memory"
-            }
-            agents.append(agent)
-            logger.info(f"Inserting agent {agent['id']} into Supabase...")
-            supabase.table("agents").insert({
-                "id": agent["id"],
-                "name": agent["name"],
-                "x": agent["x"],
-                "y": agent["y"],
-                "memory": agent["memory"]
-            }).execute()
-        logger.info("Agents initialized successfully.")
-    except Exception as e:
-        logger.error(f"Failed to initialize agents: {e}")
-        raise
+async def initialize_agents():
+    agents = [{"id": i, "x": random.randint(0, GRID_SIZE - 1), "y": random.randint(0, GRID_SIZE - 1), "memory": ""} for i in range(NUM_AGENTS)]
+    for agent in agents:
+        await redis.hset(f"agent:{agent['id']}", mapping=agent)
+    await supabase.table("agents").delete().neq("id", -1).execute()
+    await supabase.table("agents").insert(agents).execute()
     return agents
 
-def update_agent_position(agent: Dict, movement: str):
-    if movement == "x+1":
-        agent["x"] = (agent["x"] + 1) % GRID_SIZE
-    elif movement == "x-1":
-        agent["x"] = (agent["x"] - 1) % GRID_SIZE
-    elif movement == "y+1":
-        agent["y"] = (agent["y"] + 1) % GRID_SIZE
-    elif movement == "y-1":
-        agent["y"] = (agent["y"] - 1) % GRID_SIZE
-    elif movement == "stay":
-        pass  # No movement
-    else:
-        logger.warning("Invalid movement command '%s' for agent %s. Staying in place.", movement, agent['id'])
+async def fetch_nearby_messages(agent, agents):
+    nearby_agents = [a for a in agents if a["id"] != agent["id"] and chebyshev_distance(agent["x"], agent["y"], a["x"], a["y"]) <= CHEBYSHEV_DISTANCE]
+    messages = [await redis.hget(f"agent:{a['id']}", "message") for a in nearby_agents]
+    return [m for m in messages if m]
 
-async def perform_step(step: int):
-    agents = fetch_all_agents()
-    agent_responses = {}
+async def paced_request_execution(tasks):
+    """
+    Process tasks with a delay between each request to avoid overloading the API.
+    """
+    results = []
+    for task in tasks:
+        result = await task
+        results.append(result)
+        await asyncio.sleep(REQUEST_DELAY)  # Delay between requests
+    return results
 
-    for agent in agents:
-        received_messages = fetch_messages(step, agent, agents)
-        message_prompt = construct_prompt(MESSAGE_GENERATION_PROMPT, agent)
-        memory_prompt = construct_prompt(MEMORY_GENERATION_PROMPT, agent)
-        movement_prompt = construct_prompt(MOVEMENT_GENERATION_PROMPT, agent)
-
-        # Generate Message
-        message_response = await send_llm_request(message_prompt)
-        message_content = message_response["message"] if message_response else ""
-
-        if message_content:
-            try:
-                supabase.table("messages").insert({
-                    "step": step,
-                    "sender_id": agent["id"],
-                    "content": message_content
-                }).execute()
-                logger.info("Agent %s sent message: %s", agent["id"], message_content)
-            except Exception as e:
-                logger.error("Failed to insert message for agent %s: %s", agent["id"], e)
-
-        # Generate Memory
-        memory_response = await send_llm_request(memory_prompt)
-        updated_memory = memory_response["memory"] if memory_response else agent["memory"]
-
-        try:
-            supabase.table("agents").update({
-                "memory": updated_memory
-            }).eq("id", agent["id"]).execute()
-            logger.info("Agent %s updated memory.", agent["id"])
-        except Exception as e:
-            logger.error("Failed to update memory for agent %s: %s", agent["id"], e)
-
-        # Generate Movement
-        movement_response = await send_llm_request(movement_prompt)
-        movement = movement_response["movement"] if movement_response else "stay"
-
-        agent_responses[agent["id"]] = movement
-
-    # After all agents have responded, handle movements
-    for agent in agents:
-        movement = agent_responses.get(agent["id"], "stay")
-        update_agent_position(agent, movement)
-        try:
-            # Update position in Supabase
-            supabase.table("agents").update({
-                "x": agent["x"],
-                "y": agent["y"]
-            }).eq("id", agent["id"]).execute()
-            # Insert movement into Supabase
-            supabase.table("movements").insert({
-                "step": step,
-                "agent_id": agent["id"],
-                "movement": movement
-            }).execute()
-            logger.info("Agent %s moved %s to (%s, %s)", agent["id"], movement, agent["x"], agent["y"])
-        except Exception as e:
-            logger.error("Failed to update movement for agent %s: %s", agent["id"], e)
-
-def fetch_all_agents() -> List[Dict]:
-    try:
-        response = supabase.table("agents").select("*").execute()
-        return response.data
-    except Exception as e:
-        logger.error("Failed to fetch agents: %s", e)
-        return []
-
-def fetch_messages(step: int, agent: Dict, agents: List[Dict]) -> List[str]:
-    nearby_agents = get_nearby_agents(agent, agents)
-    messages = []
-    for nearby in nearby_agents:
-        try:
-            # Fetch the latest message from this nearby agent up to the previous step
-            response = supabase.table("messages") \
-                .select("content") \
-                .eq("sender_id", nearby["id"]) \
-                .lte("step", step - 1) \
-                .order("step", desc=True) \
-                .limit(1) \
-                .execute()
-            if response.data:
-                messages.append(response.data[0]["content"])
-        except Exception as e:
-            logger.error("Failed to fetch messages for agent %s from agent %s: %s", agent["id"], nearby["id"], e)
-    if not messages:
-        messages.append("No Messages")
-    return messages
-
-def get_simulation_status() -> Dict:
-    try:
-        response = supabase.table("simulation").select("*").eq("id", 1).execute()
-        if response.data:
-            return response.data[0]
-        else:
-            # Initialize simulation status if not present
-            supabase.table("simulation").insert({
-                "id": 1,
-                "current_step": 0,
-                "status": "stopped"
-            }).execute()
-            return {"id": 1, "current_step": 0, "status": "stopped"}
-    except Exception as e:
-        logger.error("Failed to fetch simulation status: %s", e)
-        raise
-
-def update_simulation_status(current_step: int, status: str):
-    try:
-        supabase.table("simulation").update({
-            "current_step": current_step,
-            "status": status
-        }).eq("id", 1).execute()
-        logger.info("Simulation status updated to '%s' at step %s.", status, current_step)
-    except Exception as e:
-        logger.error("Failed to update simulation status: %s", e)
-
-# ---------------------- API Models ----------------------
-
-class StepRequest(BaseModel):
-    steps: Optional[int] = 1  # Number of steps to perform
-
-# ---------------------- API Endpoints ----------------------
-
+# Simulation API Endpoints
 @app.post("/reset")
-@limiter.limit("10/minute")  # Example rate limit for /reset
-async def reset_simulation(request: Request):
-    try:
-        # Clear specific tables
-        supabase.table("agents").delete().neq("id", -1).execute()
-        supabase.table("messages").delete().neq("id", -1).execute()
-        supabase.table("movements").delete().neq("id", -1).execute()
-        # Reset simulation status
-        supabase.table("simulation").update({
-            "current_step": 0,
-            "status": "stopped"
-        }).eq("id", 1).execute()
-        logger.info("Simulation has been reset.")
-        return JSONResponse(content={"status": "Simulation reset successfully."})
-    except Exception as e:
-        logger.error("Failed to reset simulation: %s", e)
-        raise HTTPException(status_code=500, detail="Failed to reset simulation.")
+async def reset_simulation():
+    await redis.flushdb()
+    await initialize_agents()
+    return JSONResponse({"status": "Simulation reset successfully."})
 
 @app.post("/start")
-@limiter.limit("10/minute")  # Example rate limit for /start
-async def start_simulation(request: Request):
-    try:
-        status = get_simulation_status()
-        if status["status"] == "running":
-            logger.warning("Simulation already running.")
-            raise HTTPException(status_code=400, detail="Simulation is already running.")
-        logger.info("Initializing agents...")
-        initialize_agents()
-        update_simulation_status(current_step=0, status="running")
-        logger.info("Simulation started successfully.")
-        return JSONResponse(content={"status": "Simulation started successfully."})
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        logger.error(f"Failed to start simulation: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to start simulation: {str(e)}")
-
-from fastapi import Body  # Import for parsing request body directly
+async def start_simulation():
+    agents = await initialize_agents()
+    return JSONResponse({"status": "Simulation started successfully.", "agents": agents})
 
 @app.post("/step")
-@limiter.limit("60/minute")  # Example rate limit for /step
-async def perform_steps(request: Request, step_request: StepRequest = Body(...)):  # Add `request`
-    try:
-        status = get_simulation_status()
-        if status["status"] != "running":
-            logger.warning("Attempted to perform steps, but simulation is not running.")
-            raise HTTPException(status_code=400, detail="Simulation is not running.")
+async def perform_steps(request: StepRequest):
+    agents = [await redis.hgetall(f"agent:{i}") for i in range(NUM_AGENTS)]
+    for _ in range(request.steps):
+        # Message Generation
+        message_tasks = [send_llm_request(construct_prompt(MESSAGE_GENERATION_PROMPT, agent, await fetch_nearby_messages(agent, agents))) for agent in agents]
+        message_results = await paced_request_execution(message_tasks)
+        
+        for agent, message_result in zip(agents, message_results):
+            await redis.hset(f"agent:{agent['id']}", "message", message_result.get("message", ""))
 
-        steps_to_perform = step_request.steps  # Parse `steps` from the request body
-        if steps_to_perform < 1:
-            logger.warning("Invalid number of steps requested: %s", steps_to_perform)
-            raise HTTPException(status_code=400, detail="Number of steps must be at least 1.")
-        if status["current_step"] + steps_to_perform > MAX_STEPS:
-            steps_to_perform = MAX_STEPS - status["current_step"]
-            if steps_to_perform <= 0:
-                logger.warning("Maximum number of steps reached.")
-                raise HTTPException(status_code=400, detail="Maximum number of steps reached.")
+        # Memory Generation
+        memory_tasks = [send_llm_request(construct_prompt(MEMORY_GENERATION_PROMPT, agent, await fetch_nearby_messages(agent, agents))) for agent in agents]
+        memory_results = await paced_request_execution(memory_tasks)
+        
+        for agent, memory_result in zip(agents, memory_results):
+            await redis.hset(f"agent:{agent['id']}", "memory", memory_result.get("memory", agent["memory"]))
 
-        for _ in range(steps_to_perform):
-            current_step = get_simulation_status()["current_step"] + 1
-            await perform_step(current_step)
-            update_simulation_status(current_step=current_step, status="running")
-            if current_step >= MAX_STEPS:
-                update_simulation_status(current_step=current_step, status="stopped")
-                logger.info("Maximum number of steps reached. Simulation stopped.")
-                break
+        # Movement Generation
+        movement_tasks = [send_llm_request(construct_prompt(MOVEMENT_GENERATION_PROMPT, agent, [])) for agent in agents]
+        movement_results = await paced_request_execution(movement_tasks)
+        
+        for agent, movement_result in zip(agents, movement_results):
+            movement = movement_result.get("movement", "stay")
+            if movement == "x+1": agent["x"] = (agent["x"] + 1) % GRID_SIZE
+            elif movement == "x-1": agent["x"] = (agent["x"] - 1) % GRID_SIZE
+            elif movement == "y+1": agent["y"] = (agent["y"] + 1) % GRID_SIZE
+            elif movement == "y-1": agent["y"] = (agent["y"] - 1) % GRID_SIZE
+            await redis.hset(f"agent:{agent['id']}", mapping=agent)
 
-        final_step = get_simulation_status()["current_step"]
-        logger.info("Performed %s step(s). Current step: %s.", steps_to_perform, final_step)
-        return JSONResponse(content={
-            "status": f"Performed {steps_to_perform} step(s).",
-            "current_step": final_step,
-            "max_steps": MAX_STEPS
-        })
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        logger.error("Failed to perform steps: %s", e)
-        raise HTTPException(status_code=500, detail="Failed to perform steps.")
+    return JSONResponse({"status": f"Performed {request.steps} step(s)."})
 
 @app.post("/stop")
-@limiter.limit("10/minute")  # Example rate limit for /stop
-async def stop_simulation(request: Request):  # Add `request` parameter
-    try:
-        status = get_simulation_status()
-        if status["status"] != "running":
-            logger.warning("Attempted to stop simulation, but it is not running.")
-            raise HTTPException(status_code=400, detail="Simulation is not running.")
-        # Update simulation status
-        update_simulation_status(current_step=status["current_step"], status="stopped")
-        logger.info("Simulation has been stopped.")
-        return JSONResponse(content={"status": "Simulation stopped successfully."})
-    except Exception as e:
-        logger.error("Failed to stop simulation: %s", e)
-        raise HTTPException(status_code=500, detail="Failed to stop simulation.")
-
-# ---------------------- Run the App ----------------------
-
-# To run the app locally for testing, use the command:
-# uvicorn src.main:app --host 0.0.0.0 --port 8000
-
-# On Vercel, deploy this script as a serverless function following Vercel's deployment guidelines.
+async def stop_simulation():
+    return JSONResponse({"status": "Simulation stopped successfully."})

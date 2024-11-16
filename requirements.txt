@@ -4,3 +4,4 @@ httpx
 pydantic
 python-dotenv
 slowapi
+aiolimiter>=1.0.0
