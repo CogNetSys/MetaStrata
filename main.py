@@ -32,7 +32,7 @@ LLM_MODEL = "llama-3.2-11b-vision-preview"
 LLM_MAX_TOKENS = 2048
 LLM_TEMPERATURE = 0.7
 REQUEST_DELAY = 2.2  # Fixed delay in seconds between requests
-MAX_CONCURRENT_REQUESTS = 1  # Limit concurrent requests to prevent rate limiting
+MAX_CONCURRENT_REQUESTS = 5  # Limit concurrent requests to prevent rate limiting
 
 # Redis & Supabase Initialization
 redis = Redis(
