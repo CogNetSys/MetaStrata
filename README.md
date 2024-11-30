@@ -1,1 +1,2 @@
-This is based on the Takata et al implementation. It is the default so far.
+This is based on the Takata et al implementation.
+This is the improved version of the Takat et al Implementation.
