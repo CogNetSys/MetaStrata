@@ -1,0 +1,1 @@
+This is based on the Takata et al implementation. It is the default so far.
