@@ -317,16 +317,16 @@ async def perform_steps(request: StepRequest):
             break
 
         # Use either custom prompts from FastAPI or fall back to default prompts
-        message_prompt = prompts.get("message_generation_prompt", MESSAGE_GENERATION_PROMPT)
-        memory_prompt = prompts.get("memory_generation_prompt", MEMORY_GENERATION_PROMPT)
-        movement_prompt = prompts.get("movement_generation_prompt", MOVEMENT_GENERATION_PROMPT)
+        message_prompt = prompts.get("message_generation_prompt", DEFAULT_MESSAGE_GENERATION_PROMPT)
+        memory_prompt = prompts.get("memory_generation_prompt", DEFAULT_MEMORY_GENERATION_PROMPT)
+        movement_prompt = prompts.get("movement_generation_prompt", DEFAULT_MOVEMENT_GENERATION_PROMPT)
 
         # Message Generation
         for agent in agents:
             message_result = await send_llm_request(
                 message_prompt.format(
                     agentId=agent["id"], x=agent["x"], y=agent["y"],
-                    grid_description="some grid description",  # Add actual grid description here
+                    grid_description=GRID_DESCRIPTION,
                     memory=agent["memory"], messages="".join(await fetch_nearby_messages(agent, agents)),
                     distance=CHEBYSHEV_DISTANCE
                 )
@@ -346,7 +346,7 @@ async def perform_steps(request: StepRequest):
             memory_result = await send_llm_request(
                 memory_prompt.format(
                     agentId=agent["id"], x=agent["x"], y=agent["y"],
-                    grid_description="some grid description",  # Add actual grid description here
+                    grid_description=GRID_DESCRIPTION,
                     memory=agent["memory"], messages="".join(await fetch_nearby_messages(agent, agents)),
                     distance=CHEBYSHEV_DISTANCE
                 )
@@ -366,7 +366,7 @@ async def perform_steps(request: StepRequest):
             movement_result = await send_llm_request(
                 movement_prompt.format(
                     agentId=agent["id"], x=agent["x"], y=agent["y"],
-                    grid_description="some grid description",  # Add actual grid description here
+                    grid_description=GRID_DESCRIPTION,
                     memory=agent["memory"], messages="".join(await fetch_nearby_messages(agent, agents)),
                     distance=CHEBYSHEV_DISTANCE
                 )
