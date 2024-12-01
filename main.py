@@ -12,6 +12,8 @@ import httpx
 import logging
 from asyncio import Semaphore
 from contextlib import asynccontextmanager
+from typing import List
+
 
 load_dotenv()
 
@@ -65,6 +67,14 @@ class PromptSettings(BaseModel):
     memory_generation_prompt: str
     movement_generation_prompt: str
 
+# Agent Model (Pydantic)
+class Agent(BaseModel):
+    id: int
+    name: str
+    x: int
+    y: int
+    memory: str = ""  # Default empty memory for new agents
+
 # Redis & Supabase Initialization
 redis = Redis(
     host=REDIS_ENDPOINT,
@@ -84,6 +94,10 @@ global_request_semaphore = Semaphore(MAX_CONCURRENT_REQUESTS)
 
 # Stop signal
 stop_signal = False
+
+# Fetching Neraby Agents Function
+def chebyshev_distance(x1, y1, x2, y2):
+    return max(abs(x1 - x2), abs(y1 - y2))
 
 # Prompt Templates
 GRID_DESCRIPTION = "The field size is 30 x 30 with periodic boundary conditions, and there are a total of 10 beings. You are free to move around the field and converse with other beings."
@@ -138,6 +152,10 @@ async def fetch_prompts_from_fastapi():
         else:
             logger.warning("Failed to fetch prompts, using default ones.")
             return {}  # Return an empty dict to trigger the default prompts
+        
+# Chebyshev Distance Helper Function for calculating the distance for Nearby Agents function.
+def chebyshev_distance(x1, y1, x2, y2):
+    return max(abs(x1 - x2), abs(y1 - y2))
         
 async def send_llm_request(prompt, max_retries=3, base_delay=2):
     global stop_signal
@@ -389,6 +407,100 @@ async def stop_simulation():
     stop_signal = True
     logger.info("Stop signal triggered.")
     return JSONResponse({"status": "Simulation stopping."})
+
+@app.post("/agents", response_model=Agent)
+async def create_agent(agent: Agent):
+    # Create agent data in Redis
+    await redis.hset(f"agent:{agent.id}", mapping=agent.dict())
+    
+    # Optionally, store agent in Supabase for persistent storage
+    supabase.table("agents").insert(agent.dict()).execute()
+    
+    return agent
+
+@app.get("/agents/{agent_id}", response_model=Agent)
+async def get_agent(agent_id: int):
+    # Fetch agent data from Redis
+    agent_data = await redis.hgetall(f"agent:{agent_id}")
+    if not agent_data:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    # Convert Redis data into an Agent model (ensure proper types are cast)
+    agent = Agent(
+        id=agent_id,
+        name=agent_data.get("name"),
+        x=int(agent_data.get("x")),
+        y=int(agent_data.get("y")),
+        memory=agent_data.get("memory", "")
+    )
+    return agent
+
+@app.put("/agents/{agent_id}", response_model=Agent)
+async def update_agent(agent_id: int, agent: Agent):
+    # Update agent data in Redis (assuming 'hset' is used to update fields)
+    await redis.hset(f"agent:{agent_id}", mapping=agent.dict())
+    
+    # Optionally, update agent in Supabase for persistent storage
+    supabase.table("agents").update(agent.dict()).eq("id", agent_id).execute()
+    
+    return agent
+
+@app.post("/agents/{agent_id}/send_message")
+async def send_message(agent_id: int, message: str):
+    # Get the agent's current position and details
+    agent_data = await redis.hgetall(f"agent:{agent_id}")
+    if not agent_data:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    # Save the message in Redis for the agent
+    await redis.hset(f"agent:{agent_id}", "message", message)
+    
+    return {"status": "Message sent successfully", "message": message}
+
+@app.delete("/agents/{agent_id}")
+async def delete_agent(agent_id: int):
+    # Delete agent from Redis
+    await redis.delete(f"agent:{agent_id}")
+    
+    # Optionally, delete agent from Supabase
+    supabase.table("agents").delete().eq("id", agent_id).execute()
+    
+    return {"status": "Agent deleted successfully"}
+
+@app.get("/agents/{agent_id}/nearby", response_model=List[Agent])
+async def get_nearby_agents(agent_id: int):
+    # Get the agent's position from Redis
+    agent_data = await redis.hgetall(f"agent:{agent_id}")
+    if not agent_data:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    agent = Agent(**agent_data)
+    
+    # Fetch all agents except the current one
+    all_agents = [
+        Agent(**await redis.hgetall(f"agent:{i}"))
+        for i in range(NUM_AGENTS) if i != agent_id
+    ]
+    
+    # Filter nearby agents based on Chebyshev distance
+    nearby_agents = [
+        a for a in all_agents
+        if chebyshev_distance(agent.x, agent.y, a.x, a.y) <= CHEBYSHEV_DISTANCE
+    ]
+    
+    return nearby_agents
+
+@app.post("/sync_agents")
+async def sync_agents():
+    all_agents = [
+        Agent(**await redis.hgetall(f"agent:{i}"))
+        for i in range(NUM_AGENTS)
+    ]
+    
+    for agent in all_agents:
+        supabase.table("agents").upsert(agent.dict()).execute()
+    
+    return {"status": "Agents synchronized between Redis and Supabase"}
 
 @app.get("/settings", response_model=SimulationSettings)
 async def get_settings():
