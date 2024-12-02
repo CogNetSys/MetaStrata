@@ -14,6 +14,28 @@ from asyncio import Semaphore
 from contextlib import asynccontextmanager
 from typing import List
 
+from config import (
+    SUPABASE_URL,
+    SUPABASE_KEY,
+    GROQ_API_KEY,
+    GROQ_API_ENDPOINT,
+    REDIS_ENDPOINT,
+    REDIS_PASSWORD,
+    GRID_SIZE,
+    NUM_AGENTS,
+    MAX_STEPS,
+    CHEBYSHEV_DISTANCE,
+    LLM_MODEL,
+    LLM_MAX_TOKENS,
+    LLM_TEMPERATURE,
+    REQUEST_DELAY,
+    MAX_CONCURRENT_REQUESTS,
+    GRID_DESCRIPTION,
+    DEFAULT_MESSAGE_GENERATION_PROMPT,
+    DEFAULT_MEMORY_GENERATION_PROMPT,
+    DEFAULT_MOVEMENT_GENERATION_PROMPT,
+    logger,
+)
 
 load_dotenv()
 
@@ -230,8 +252,7 @@ async def send_llm_request(prompt, max_retries=3, base_delay=2):
 
 async def initialize_agents():
     logger.info("Resetting simulation state.")
-    supabase.table("movements").delete().neq("agent_id", -1).execute()
-    supabase.table("agents").delete().neq("id", -1).execute()
+    await redis.flushdb()  # Clear all Redis data, including agent_keys
 
     agents = [
         {
@@ -243,18 +264,46 @@ async def initialize_agents():
         }
         for i in range(NUM_AGENTS)
     ]
-    supabase.table("agents").insert(agents).execute()
+
     for agent in agents:
-        await redis.hset(f"agent:{agent['id']}", mapping=agent)
+        agent_key = f"agent:{agent['id']}"
+        await redis.hset(agent_key, mapping=agent)
+        await redis.lpush("agent_keys", agent_key)  # Add to agent_keys list
+        await redis.delete(f"{agent['id']}:messages")  # Clear message queue
+
     logger.info("Agents initialized.")
     return agents
 
-async def fetch_nearby_messages(agent, agents):
+async def fetch_nearby_messages(agent, agents, message_to_send=None):
+    """
+    Fetch messages from nearby agents or optionally send a message to them.
+    Args:
+        agent (dict): The current agent's data.
+        agents (list): List of all agents.
+        message_to_send (str): Optional message to send to nearby agents.
+    Returns:
+        list: A list of messages received from nearby agents.
+    """
     nearby_agents = [
         a for a in agents if a["id"] != agent["id"] and chebyshev_distance(agent["x"], agent["y"], a["x"], a["y"]) <= CHEBYSHEV_DISTANCE
     ]
-    messages = [await redis.hget(f"agent:{a['id']}", "message") for a in nearby_agents]
-    return [m for m in messages if m]
+    received_messages = []
+
+    for nearby_agent in nearby_agents:
+        # Fetch existing messages from the nearby agent
+        msg = await redis.hget(f"agent:{nearby_agent['id']}", "message")
+        logger.info(f"Fetched message for agent {nearby_agent['id']}: {msg}")
+        if msg:
+            received_messages.append(msg)
+
+        # If a message is being sent, add it to the recipient's queue
+        if message_to_send:
+            recipient_key = f"agent:{nearby_agent['id']}:messages"
+            await redis.lpush(recipient_key, f"From Agent {agent['id']}: {message_to_send}")
+            logger.info(f"Sent message from Agent {agent['id']} to Agent {nearby_agent['id']}")
+
+    return received_messages
+
 
 # Lifespan Context Manager
 @asynccontextmanager
@@ -300,41 +349,74 @@ async def perform_steps(request: StepRequest):
     # Fetch the current prompt templates from FastAPI
     prompts = await fetch_prompts_from_fastapi()
 
-    agents = [
-        {
-            "id": int(agent["id"]),
-            "name": agent["name"],
-            "x": int(agent["x"]),
-            "y": int(agent["y"]),
-            "memory": agent.get("memory", "")
-        }
-        for agent in [await redis.hgetall(f"agent:{i}") for i in range(NUM_AGENTS)]
-    ]
+    logger.info("Starting simulation steps...")
 
-    for _ in range(request.steps):
+    for step in range(request.steps):
         if stop_signal:
             logger.info("Stopping steps due to stop signal.")
             break
 
-        # Use either custom prompts from FastAPI or fall back to default prompts
-        message_prompt = prompts.get("message_generation_prompt", DEFAULT_MESSAGE_GENERATION_PROMPT)
-        memory_prompt = prompts.get("memory_generation_prompt", DEFAULT_MEMORY_GENERATION_PROMPT)
-        movement_prompt = prompts.get("movement_generation_prompt", DEFAULT_MOVEMENT_GENERATION_PROMPT)
+        # Fetch all agent keys dynamically from Redis
+        agent_keys = await redis.keys("agent:*")  # Match all agent keys
+        if not agent_keys:
+            logger.warning("No agents found in Redis!")
+            return JSONResponse({"status": "No agents to process."})
+
+        logger.info(f"Step {step + 1}: Found {len(agent_keys)} agents.")
+
+        # Filter keys to ensure only valid hashes are processed
+        valid_agent_keys = []
+        for key in agent_keys:
+            key_type = await redis.type(key)
+            if key_type == "hash":
+                valid_agent_keys.append(key)
+            else:
+                logger.warning(f"Skipping invalid key {key} of type {key_type}")
+
+        # Fetch agent data from Redis for all valid keys
+        agents = [
+            {
+                "id": int(agent_data["id"]),
+                "name": agent_data["name"],
+                "x": int(agent_data["x"]),
+                "y": int(agent_data["y"]),
+                "memory": agent_data.get("memory", "")
+            }
+            for agent_data in await asyncio.gather(*[redis.hgetall(key) for key in valid_agent_keys])
+            if agent_data  # Ensure we only include valid agent data
+        ]
+
+        logger.info(f"Processing {len(agents)} agents.")
+
+        # Process incoming messages for each agent
+        for agent in agents:
+            # Fetch the existing message field
+            message = await redis.hget(f"agent:{agent['id']}", "message")
+            
+            if message:
+                logger.info(f"Agent {agent['id']} received message: {message}")
+
+                # Optionally update memory or trigger actions based on the message
+                updated_memory = f"{agent['memory']} | Received: {message}"
+                await redis.hset(f"agent:{agent['id']}", "memory", updated_memory)
+
+                # Clear the message field after processing (if required)
+                await redis.hset(f"agent:{agent['id']}", "message", "")
+
+        # Clear message queues only after processing all agents
+        for agent in agents:
+            await redis.delete(f"agent:{agent['id']}:messages")
+
 
         # Message Generation
         for agent in agents:
+            messages = await fetch_nearby_messages(agent, agents)
+            message_prompt = prompts.get("message_generation_prompt", DEFAULT_MESSAGE_GENERATION_PROMPT)
             message_result = await send_llm_request(
-                message_prompt.format(
-                    agentId=agent["id"], x=agent["x"], y=agent["y"],
-                    grid_description=GRID_DESCRIPTION,
-                    memory=agent["memory"], messages="".join(await fetch_nearby_messages(agent, agents)),
-                    distance=CHEBYSHEV_DISTANCE
-                )
+                construct_prompt(message_prompt, agent, messages)
             )
-            if "message" not in message_result:
-                logger.warning(f"Skipping message update for Agent {agent['id']} due to invalid response.")
-                continue
-            await redis.hset(f"agent:{agent['id']}", "message", message_result.get("message", ""))
+            if "message" in message_result:
+                await redis.hset(f"agent:{agent['id']}", "message", message_result["message"])
             await asyncio.sleep(REQUEST_DELAY)
 
         if stop_signal:
@@ -343,18 +425,13 @@ async def perform_steps(request: StepRequest):
 
         # Memory Generation
         for agent in agents:
+            messages = await fetch_nearby_messages(agent, agents)
+            memory_prompt = prompts.get("memory_generation_prompt", DEFAULT_MEMORY_GENERATION_PROMPT)
             memory_result = await send_llm_request(
-                memory_prompt.format(
-                    agentId=agent["id"], x=agent["x"], y=agent["y"],
-                    grid_description=GRID_DESCRIPTION,
-                    memory=agent["memory"], messages="".join(await fetch_nearby_messages(agent, agents)),
-                    distance=CHEBYSHEV_DISTANCE
-                )
+                construct_prompt(memory_prompt, agent, messages)
             )
-            if "memory" not in memory_result:
-                logger.warning(f"Skipping memory update for Agent {agent['id']} due to invalid response.")
-                continue
-            await redis.hset(f"agent:{agent['id']}", "memory", memory_result.get("memory", agent["memory"]))
+            if "memory" in memory_result:
+                await redis.hset(f"agent:{agent['id']}", "memory", memory_result["memory"])
             await asyncio.sleep(REQUEST_DELAY)
 
         if stop_signal:
@@ -363,42 +440,36 @@ async def perform_steps(request: StepRequest):
 
         # Movement Generation
         for agent in agents:
+            movement_prompt = prompts.get("movement_generation_prompt", DEFAULT_MOVEMENT_GENERATION_PROMPT)
             movement_result = await send_llm_request(
-                movement_prompt.format(
-                    agentId=agent["id"], x=agent["x"], y=agent["y"],
-                    grid_description=GRID_DESCRIPTION,
-                    memory=agent["memory"], messages="".join(await fetch_nearby_messages(agent, agents)),
-                    distance=CHEBYSHEV_DISTANCE
-                )
+                construct_prompt(movement_prompt, agent, [])
             )
-            if "movement" not in movement_result:
-                logger.warning(f"Skipping movement update for Agent {agent['id']} due to invalid response.")
-                continue
+            if "movement" in movement_result:
+                movement = movement_result["movement"].strip().lower()
+                initial_position = (agent["x"], agent["y"])
 
-            # Apply movement logic
-            movement = movement_result.get("movement", "stay").strip().lower()
-            initial_position = (agent["x"], agent["y"])
+                # Apply movement logic
+                if movement == "x+1":
+                    agent["x"] = (agent["x"] + 1) % GRID_SIZE
+                elif movement == "x-1":
+                    agent["x"] = (agent["x"] - 1) % GRID_SIZE
+                elif movement == "y+1":
+                    agent["y"] = (agent["y"] + 1) % GRID_SIZE
+                elif movement == "y-1":
+                    agent["y"] = (agent["y"] - 1) % GRID_SIZE
+                elif movement == "stay":
+                    logger.info(f"Agent {agent['id']} stays in place at {initial_position}.")
+                    continue
+                else:
+                    logger.warning(f"Invalid movement command for Agent {agent['id']}: {movement}")
+                    continue
 
-            if movement == "x+1":
-                agent["x"] = (agent["x"] + 1) % GRID_SIZE
-            elif movement == "x-1":
-                agent["x"] = (agent["x"] - 1) % GRID_SIZE
-            elif movement == "y+1":
-                agent["y"] = (agent["y"] + 1) % GRID_SIZE
-            elif movement == "y-1":
-                agent["y"] = (agent["y"] - 1) % GRID_SIZE
-            elif movement == "stay":
-                logger.info(f"Agent {agent['id']} stays in place at {initial_position}.")
-                continue  # No update needed for stay
-            else:
-                logger.warning(f"Invalid movement command for Agent {agent['id']}: {movement}")
-                continue  # Skip invalid commands
-
-            # Log and update position
-            logger.info(f"Agent {agent['id']} moved from {initial_position} to ({agent['x']}, {agent['y']}) with action '{movement}'.")
-            await redis.hset(f"agent:{agent['id']}", mapping={"x": agent["x"], "y": agent["y"]})
+                # Log and update position
+                logger.info(f"Agent {agent['id']} moved from {initial_position} to ({agent['x']}, {agent['y']}) with action '{movement}'.")
+                await redis.hset(f"agent:{agent['id']}", mapping={"x": agent["x"], "y": agent["y"]})
             await asyncio.sleep(REQUEST_DELAY)
 
+    logger.info(f"Completed {request.steps} step(s).")
     return JSONResponse({"status": f"Performed {request.steps} step(s)."})
 
 @app.post("/stop")
@@ -410,12 +481,26 @@ async def stop_simulation():
 
 @app.post("/agents", response_model=Agent)
 async def create_agent(agent: Agent):
-    # Create agent data in Redis
-    await redis.hset(f"agent:{agent.id}", mapping=agent.dict())
-    
-    # Optionally, store agent in Supabase for persistent storage
+    agent_key = f"agent:{agent.id}"
+
+    # Check if the ID already exists in Redis
+    if await redis.exists(agent_key):
+        raise HTTPException(status_code=400, detail=f"Agent ID {agent.id} already exists in Redis.")
+
+    # Check if the ID already exists in Supabase
+    existing_agent = supabase.table("agents").select("id").eq("id", agent.id).execute()
+    if existing_agent.data:
+        raise HTTPException(status_code=400, detail=f"Agent ID {agent.id} already exists in Supabase.")
+
+    # Save agent data in Redis
+    await redis.hset(agent_key, mapping=agent.dict())
+
+    # Add the agent key to the Redis list
+    await redis.lpush("agent_keys", agent_key)
+
+    # Save the agent in Supabase
     supabase.table("agents").insert(agent.dict()).execute()
-    
+
     return agent
 
 @app.get("/agents/{agent_id}", response_model=Agent)
@@ -445,26 +530,45 @@ async def update_agent(agent_id: int, agent: Agent):
     
     return agent
 
-@app.post("/agents/{agent_id}/send_message")
-async def send_message(agent_id: int, message: str):
-    # Get the agent's current position and details
-    agent_data = await redis.hgetall(f"agent:{agent_id}")
-    if not agent_data:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    
-    # Save the message in Redis for the agent
-    await redis.hset(f"agent:{agent_id}", "message", message)
-    
-    return {"status": "Message sent successfully", "message": message}
+@app.post("/agents/{agent_id}/send_memory")
+async def send_memory(agent_id: int, recipient_id: int, message: str):
+    sender_key = f"agent:{agent_id}"
+    recipient_key = f"agent:{recipient_id}"
+
+    # Validate that the sender and recipient exist
+    if not await redis.exists(sender_key):
+        raise HTTPException(status_code=404, detail=f"Sender Agent ID {agent_id} not found.")
+    if not await redis.exists(recipient_key):
+        raise HTTPException(status_code=404, detail=f"Recipient Agent ID {recipient_id} not found.")
+
+    # Fetch the recipient's existing memory field
+    existing_memory = await redis.hget(recipient_key, "memory")
+    if existing_memory:
+        # Append the new message to the recipient's memory
+        updated_memory = f"{existing_memory}\nFrom Agent {agent_id}: {message}"
+    else:
+        # Start the memory with the new message
+        updated_memory = f"From Agent {agent_id}: {message}"
+
+    # Update the recipient's memory field
+    await redis.hset(recipient_key, "memory", updated_memory)
+
+    logger.info(f'Message appended to Agent {recipient_id}\'s memory from Agent {agent_id}: "{message}"')
+    return {"status": "Memory updated successfully", "message": message}
 
 @app.delete("/agents/{agent_id}")
 async def delete_agent(agent_id: int):
+    agent_key = f"agent:{agent_id}"
+
     # Delete agent from Redis
-    await redis.delete(f"agent:{agent_id}")
-    
-    # Optionally, delete agent from Supabase
+    await redis.delete(agent_key)
+
+    # Remove the key from the Redis list
+    await redis.lrem("agent_keys", 0, agent_key)
+
+    # Optionally, delete the agent from Supabase
     supabase.table("agents").delete().eq("id", agent_id).execute()
-    
+
     return {"status": "Agent deleted successfully"}
 
 @app.get("/agents/{agent_id}/nearby", response_model=List[Agent])
@@ -504,9 +608,17 @@ async def sync_agents():
 
 @app.get("/settings", response_model=SimulationSettings)
 async def get_settings():
+    # Fetch all agent keys from Redis
+    agent_keys = await redis.keys("agent:*")  # Get all keys matching agent pattern
+    num_agents = len(agent_keys)  # Count the number of agents
+
+    # Alternatively, you can count agents from Supabase
+    # num_agents = len(supabase.table("agents").select("id").execute().data)
+
+    # Return the dynamically updated number of agents
     return SimulationSettings(
         grid_size=GRID_SIZE,
-        num_agents=NUM_AGENTS,
+        num_agents=num_agents,
         max_steps=MAX_STEPS,
         chebyshev_distance=CHEBYSHEV_DISTANCE,
         llm_model=LLM_MODEL,
