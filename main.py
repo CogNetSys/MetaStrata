@@ -1,10 +1,9 @@
 import os
 import random
 import asyncio
-from typing import List
+from typing import List, Union
 from fastapi import FastAPI, HTTPException, WebSocket, Query
 from fastapi.responses import JSONResponse, HTMLResponse
-from fastapi.exceptions import HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.openapi.docs import get_swagger_ui_html
 from pydantic import BaseModel
@@ -15,7 +14,6 @@ import httpx
 import logging
 from asyncio import Semaphore
 from contextlib import asynccontextmanager
-from typing import List
 import traceback
 from collections import deque
 from datetime import datetime
@@ -43,7 +41,12 @@ from config import (
     logger,
 )
 
+# Load environment variables
 load_dotenv()
+
+# Import PydanticAI classes for Groq integration
+from pydantic_ai import Agent
+from pydantic_ai.models.groq import GroqModel, GroqModelName
 
 # Global log queue for real-time logging
 LOG_QUEUE = deque(maxlen=200)  # Keeps the last 200 log messages
@@ -60,18 +63,6 @@ class SimulationSettings(BaseModel):
     request_delay: float = REQUEST_DELAY
     max_concurrent_requests: int = MAX_CONCURRENT_REQUESTS
 
-# Simulation Settings Model
-class SimulationSettings(BaseModel):
-    grid_size: int = 30
-    num_entities: int = 10
-    max_steps: int = 100
-    chebyshev_distance: int = 5
-    llm_model: str = "llama-3.1-8b-instant"
-    llm_max_tokens: int = 2048
-    llm_temperature: float = 0.7
-    request_delay: float = 2.2
-    max_concurrent_requests: int = 1
-
 # Prompt Settings Model
 class PromptSettings(BaseModel):
     message_generation_prompt: str
@@ -86,7 +77,11 @@ class Entity(BaseModel):
     y: int
     memory: str = ""  # Default empty memory for new entities
 
-# Redis & Supabase Initialization
+# StepRequest Model
+class StepRequest(BaseModel):
+    steps: int
+
+# Initialize Redis
 redis = Redis(
     host=REDIS_ENDPOINT,
     port=6379,
@@ -94,6 +89,8 @@ redis = Redis(
     decode_responses=True,
     ssl=True  # Enable SSL/TLS
 )
+
+# Initialize Supabase Client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Logging Configuration
@@ -106,19 +103,38 @@ global_request_semaphore = Semaphore(MAX_CONCURRENT_REQUESTS)
 # Stop signal
 stop_signal = False
 
-# Fetching Neraby Entities Function
-def chebyshev_distance(x1, y1, x2, y2):
-    return max(abs(x1 - x2), abs(y1 - y2))
+# Define LLMResponse model for structured responses
+class LLMResponse(BaseModel):
+    message: str = ""
+    memory: str = ""
+    movement: str = "stay"
 
-# Data Models
-class StepRequest(BaseModel):
-    steps: int
+# Initialize the GroqModel for PydanticAI
+groq_model = GroqModel(
+    model_name=LLM_MODEL,
+    api_key=GROQ_API_KEY,
+    http_client=httpx.AsyncClient()
+)
+
+# Construct system prompt with instructions for structured response
+system_prompt = f"""{GRID_DESCRIPTION}
+
+Please respond with a JSON object containing the following fields:
+- message: The message to be sent.
+- memory: The updated memory.
+- movement: Your next move (options: "x+1", "x-1", "y+1", "y-1", "stay").
+"""
+
+# Initialize the PydanticAI Agent with the GroqModel and expected result type
+llm_agent = Agent(
+    groq_model,
+    result_type=LLMResponse,
+    system_prompt=system_prompt
+)
 
 # Helper Functions
 def chebyshev_distance(x1, y1, x2, y2):
-    dx = min(abs(x1 - x2), GRID_SIZE - abs(x1 - x2))
-    dy = min(abs(y1 - y2), GRID_SIZE - abs(y1 - y2))
-    return max(dx, dy)
+    return max(abs(x1 - x2), abs(y1 - y2))
 
 def construct_prompt(template, entity, messages):
     messages_str = "\n".join(messages) if messages else "No recent messages."
@@ -138,90 +154,42 @@ async def fetch_prompts_from_fastapi():
         else:
             logger.warning("Failed to fetch prompts, using default ones.")
             return {}  # Return an empty dict to trigger the default prompts
-        
+
 # Helper Function to add logs to the queue
 def add_log(message: str):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     formatted_message = f"[{timestamp}] {message}"
     LOG_QUEUE.append(formatted_message)
     logger.info(formatted_message)  # Log to the standard logger as well
-        
-# Chebyshev Distance Helper Function for calculating the distance for Nearby Entities function.
-def chebyshev_distance(x1, y1, x2, y2):
-    return max(abs(x1 - x2), abs(y1 - y2))
-        
-async def send_llm_request(prompt, max_retries=3, base_delay=2):
+
+# Modified send_llm_request using PydanticAI Agent
+async def send_llm_request(prompt):
     global stop_signal
     async with global_request_semaphore:
         if stop_signal:
             logger.info("Stopping LLM request due to stop signal.")
             return {"message": "", "memory": "", "movement": "stay"}
 
-        headers = {
-            'Authorization': f'Bearer {GROQ_API_KEY}',
-            'Content-Type': 'application/json'
-        }
-        body = {
-            "model": LLM_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": LLM_MAX_TOKENS,
-            "temperature": LLM_TEMPERATURE
-        }
+        try:
+            # Run the prompt through the PydanticAI Agent
+            result = await llm_agent.run(prompt)
+            response = result.data
 
-        attempt = 0
-        while attempt <= max_retries:
-            try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.post(GROQ_API_ENDPOINT, headers=headers, json=body)
-                    if response.status_code == 429:
-                        attempt += 1
-                        if attempt > max_retries:
-                            logger.error("Exceeded max retries for LLM request.")
-                            return {"message": "", "memory": "", "movement": "stay"}
-                        delay = base_delay * (2 ** (attempt - 1))
-                        logger.warning(f"Received 429 Too Many Requests. Retrying in {delay} seconds...")
-                        await asyncio.sleep(delay)
-                        continue
-                    response.raise_for_status()
-                    result = response.json()
+            # Optional delay as per REQUEST_DELAY
+            await asyncio.sleep(REQUEST_DELAY)
 
-                    # Validate expected keys
-                    if not all(key in result for key in ["choices"]):
-                        logger.warning(f"Incomplete response from LLM: {result}")
-                        return {"message": "", "memory": "", "movement": "stay"}
+            return {
+                "message": response.message,
+                "memory": response.memory,
+                "movement": response.movement
+            }
 
-                    # Extract content from choices
-                    content = result["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            logger.error(f"Error during LLM request: {e}")
+            return {"message": "", "memory": "", "movement": "stay"}
 
-                    # Depending on the prompt, categorize the response
-                    if "What message do you send?" in prompt:
-                        await asyncio.sleep(REQUEST_DELAY)
-                        return {"message": content}
-                    elif "create a summary" in prompt:
-                        await asyncio.sleep(REQUEST_DELAY)
-                        return {"memory": content}
-                    elif "decide your next move" in prompt:
-                        # Extract movement command
-                        valid_commands = ["x+1", "x-1", "y+1", "y-1", "stay"]
-                        content_lower = content.lower()
-                        for cmd in valid_commands:
-                            if cmd == content_lower:
-                                movement = cmd
-                                break
-                        else:
-                            logger.warning(f"Invalid movement command in LLM response: {content}")
-                            movement = "stay"  # Default to "stay" if invalid
-                        await asyncio.sleep(REQUEST_DELAY)
-                        return {"movement": movement}
-                    else:
-                        logger.warning(f"Unexpected prompt type: {prompt}")
-                        await asyncio.sleep(REQUEST_DELAY)
-                        return {"message": "", "memory": "", "movement": "stay"}
-            except Exception as e:
-                logger.error(f"Error during LLM request: {e}")
-                return {"message": "", "memory": "", "movement": "stay"}
-
-async def intialize_entities():
+# Initialize Entities Function
+async def initialize_entities():
     logger.info("Resetting simulation state.")
     await redis.flushdb()  # Clear all Redis data, including entity_keys
 
@@ -245,6 +213,7 @@ async def intialize_entities():
     logger.info("Entities initialized.")
     return entities
 
+# Fetch Nearby Messages Function
 async def fetch_nearby_messages(entity, entities, message_to_send=None):
     """
     Fetch messages from nearby entities or optionally send a message to them.
@@ -275,7 +244,6 @@ async def fetch_nearby_messages(entity, entities, message_to_send=None):
 
     return received_messages
 
-
 # Lifespan Context Manager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -291,7 +259,8 @@ async def lifespan(app: FastAPI):
         logger.info("Shutting down application...")
         stop_signal = True  # Ensure simulation stops if running
         await redis.close()
-        logger.info("Redis connection closed.")
+        await groq_model.http_client.aclose()  # Close the AsyncClient used by GroqModel
+        logger.info("Redis and Groq connections closed.")
 
 # Create FastAPI app with lifespan
 app = FastAPI(
@@ -299,11 +268,13 @@ app = FastAPI(
     version="0.0.3", 
     description="API for world simulation and managing WebSocket logs.",
     docs_url=None, 
-    lifespan=lifespan)
+    lifespan=lifespan
+)
 
 # Serve static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+# Custom Swagger UI with Real-Time Logs
 @app.get("/docs", tags=["Simulation"], include_in_schema=False)
 async def custom_swagger_ui_html():
     logger.info("Custom /docs endpoint is being served")  # Logs when /docs is accessed
@@ -402,6 +373,7 @@ async def custom_swagger_ui_html():
     
     return HTMLResponse(modified_html)
 
+# Custom Exception Handlers
 @app.exception_handler(HTTPException)
 async def custom_http_exception_handler(request, exc):
     return JSONResponse(
@@ -435,7 +407,7 @@ async def reset_simulation():
         add_log("Redis database flushed successfully.")
         
         # Initialize entities
-        entities = await intialize_entities()
+        entities = await initialize_entities()
         add_log(f"Entities reinitialized successfully. Total entities: {len(entities)}")
         
         # Log successful reset
@@ -459,7 +431,7 @@ async def initialize_simulation():
         add_log("Stop signal reset to False.")
         
         # Initialize Entities
-        entities = await intialize_entities()
+        entities = await initialize_entities()
         add_log(f"Entities initialized successfully. Total Entities: {len(entities)}")
         
         # Log success and return the response
@@ -631,6 +603,7 @@ async def perform_steps(request: StepRequest):
         logger.info(f"Completed {request.steps} step(s).")
         add_log(f"Simulation steps completed: {request.steps} step(s).")
         return JSONResponse({"status": f"Performed {request.steps} step(s)."})
+
     except Exception as e:
         logger.error(f"Unexpected error during simulation steps: {str(e)}")
         add_log(f"Unexpected error during simulation steps: {str(e)}")
@@ -655,7 +628,6 @@ async def stop_simulation():
         error_message = f"Error during simulation stop process: {str(e)}"
         add_log(error_message)
         raise HTTPException(status_code=500, detail=error_message)
-
 
 @app.post("/entities", response_model=Entity, tags=["Entities"])
 async def create_entity(entity: Entity):
@@ -700,7 +672,6 @@ async def create_entity(entity: Entity):
         error_message = f"Error creating entity with ID {entity.id}: {str(e)}"
         add_log(error_message)
         raise HTTPException(status_code=500, detail=error_message)
-
 
 @app.get("/entities/{entity_id}", response_model=Entity, tags=["Entities"])
 async def get_entity(entity_id: int):
@@ -837,7 +808,7 @@ async def get_nearby_entities(entity_id: int):
         # Fetch all entities except the current one
         all_entities = [
             Entity(**await redis.hgetall(f"entity:{i}"))
-            for i in range(NUM_ENTITIES) if i != entity_id
+            for i in range(NUM_ENTITIES) if i != entity_id and await redis.exists(f"entity:{i}")
         ]
 
         # Filter nearby entities based on Chebyshev distance
@@ -862,7 +833,7 @@ async def sync_entity():
 
         all_entities = [
             Entity(**await redis.hgetall(f"entity:{i}"))
-            for i in range(NUM_ENTITIES)
+            for i in range(NUM_ENTITIES) if await redis.exists(f"entity:{i}")
         ]
 
         for entity in all_entities:
@@ -877,6 +848,7 @@ async def sync_entity():
         add_log(error_message)
         raise HTTPException(status_code=500, detail=error_message)
 
+# Settings Endpoints
 @app.get("/settings", response_model=SimulationSettings, tags=["Settings"])
 async def get_settings():
     try:
@@ -1007,6 +979,7 @@ async def websocket_log_endpoint(websocket: WebSocket):
         add_log("WebSocket connection for real-time logs closed.")
         await websocket.close()
 
+# Run the application
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
