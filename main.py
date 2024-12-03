@@ -28,7 +28,7 @@ from config import (
     REDIS_ENDPOINT,
     REDIS_PASSWORD,
     GRID_SIZE,
-    NUM_AGENTS,
+    NUM_ENTITIES,
     MAX_STEPS,
     CHEBYSHEV_DISTANCE,
     LLM_MODEL,
@@ -51,7 +51,7 @@ LOG_QUEUE = deque(maxlen=200)  # Keeps the last 200 log messages
 # Define the configuration model
 class SimulationSettings(BaseModel):
     grid_size: int = GRID_SIZE
-    num_agents: int = NUM_AGENTS
+    num_entities: int = NUM_ENTITIES
     max_steps: int = MAX_STEPS
     chebyshev_distance: int = CHEBYSHEV_DISTANCE
     llm_model: str = LLM_MODEL
@@ -63,7 +63,7 @@ class SimulationSettings(BaseModel):
 # Simulation Settings Model
 class SimulationSettings(BaseModel):
     grid_size: int = 30
-    num_agents: int = 10
+    num_entities: int = 10
     max_steps: int = 100
     chebyshev_distance: int = 5
     llm_model: str = "llama-3.1-8b-instant"
@@ -78,13 +78,13 @@ class PromptSettings(BaseModel):
     memory_generation_prompt: str
     movement_generation_prompt: str
 
-# Agent Model (Pydantic)
-class Agent(BaseModel):
+# Entity Model (Pydantic)
+class Entity(BaseModel):
     id: int
     name: str
     x: int
     y: int
-    memory: str = ""  # Default empty memory for new agents
+    memory: str = ""  # Default empty memory for new entities
 
 # Redis & Supabase Initialization
 redis = Redis(
@@ -106,7 +106,7 @@ global_request_semaphore = Semaphore(MAX_CONCURRENT_REQUESTS)
 # Stop signal
 stop_signal = False
 
-# Fetching Neraby Agents Function
+# Fetching Neraby Entities Function
 def chebyshev_distance(x1, y1, x2, y2):
     return max(abs(x1 - x2), abs(y1 - y2))
 
@@ -120,11 +120,11 @@ def chebyshev_distance(x1, y1, x2, y2):
     dy = min(abs(y1 - y2), GRID_SIZE - abs(y1 - y2))
     return max(dx, dy)
 
-def construct_prompt(template, agent, messages):
+def construct_prompt(template, entity, messages):
     messages_str = "\n".join(messages) if messages else "No recent messages."
-    memory = agent.get("memory", "No prior memory.")
+    memory = entity.get("memory", "No prior memory.")
     return template.format(
-        agentId=agent["id"], x=agent["x"], y=agent["y"],
+        entityId=entity["id"], x=entity["x"], y=entity["y"],
         grid_description=GRID_DESCRIPTION, memory=memory,
         messages=messages_str, distance=CHEBYSHEV_DISTANCE
     )
@@ -146,7 +146,7 @@ def add_log(message: str):
     LOG_QUEUE.append(formatted_message)
     logger.info(formatted_message)  # Log to the standard logger as well
         
-# Chebyshev Distance Helper Function for calculating the distance for Nearby Agents function.
+# Chebyshev Distance Helper Function for calculating the distance for Nearby Entities function.
 def chebyshev_distance(x1, y1, x2, y2):
     return max(abs(x1 - x2), abs(y1 - y2))
         
@@ -221,57 +221,57 @@ async def send_llm_request(prompt, max_retries=3, base_delay=2):
                 logger.error(f"Error during LLM request: {e}")
                 return {"message": "", "memory": "", "movement": "stay"}
 
-async def initialize_agents():
+async def intialize_entities():
     logger.info("Resetting simulation state.")
-    await redis.flushdb()  # Clear all Redis data, including agent_keys
+    await redis.flushdb()  # Clear all Redis data, including entity_keys
 
-    agents = [
+    entities = [
         {
             "id": i,
-            "name": f"Agent-{i}",
+            "name": f"Entity-{i}",
             "x": random.randint(0, GRID_SIZE - 1),
             "y": random.randint(0, GRID_SIZE - 1),
             "memory": ""
         }
-        for i in range(NUM_AGENTS)
+        for i in range(NUM_ENTITIES)
     ]
 
-    for agent in agents:
-        agent_key = f"agent:{agent['id']}"
-        await redis.hset(agent_key, mapping=agent)
-        await redis.lpush("agent_keys", agent_key)  # Add to agent_keys list
-        await redis.delete(f"{agent['id']}:messages")  # Clear message queue
+    for entity in entities:
+        entity_key = f"entity:{entity['id']}"
+        await redis.hset(entity_key, mapping=entity)
+        await redis.lpush("entity_keys", entity_key)  # Add to entity_keys list
+        await redis.delete(f"{entity['id']}:messages")  # Clear message queue
 
-    logger.info("Agents initialized.")
-    return agents
+    logger.info("Entities initialized.")
+    return entities
 
-async def fetch_nearby_messages(agent, agents, message_to_send=None):
+async def fetch_nearby_messages(entity, entities, message_to_send=None):
     """
-    Fetch messages from nearby agents or optionally send a message to them.
+    Fetch messages from nearby entities or optionally send a message to them.
     Args:
-        agent (dict): The current agent's data.
-        agents (list): List of all agents.
-        message_to_send (str): Optional message to send to nearby agents.
+        entity (dict): The current entity's data.
+        entities (list): List of all entities.
+        message_to_send (str): Optional message to send to nearby entities.
     Returns:
-        list: A list of messages received from nearby agents.
+        list: A list of messages received from nearby entities.
     """
-    nearby_agents = [
-        a for a in agents if a["id"] != agent["id"] and chebyshev_distance(agent["x"], agent["y"], a["x"], a["y"]) <= CHEBYSHEV_DISTANCE
+    nearby_entities = [
+        a for a in entities if a["id"] != entity["id"] and chebyshev_distance(entity["x"], entity["y"], a["x"], a["y"]) <= CHEBYSHEV_DISTANCE
     ]
     received_messages = []
 
-    for nearby_agent in nearby_agents:
-        # Fetch existing messages from the nearby agent
-        msg = await redis.hget(f"agent:{nearby_agent['id']}", "message")
-        logger.info(f"Fetched message for agent {nearby_agent['id']}: {msg}")
+    for nearby_entity in nearby_entities:
+        # Fetch existing messages from the nearby entity
+        msg = await redis.hget(f"entity:{nearby_entity['id']}", "message")
+        logger.info(f"Fetched message for entity {nearby_entity['id']}: {msg}")
         if msg:
             received_messages.append(msg)
 
         # If a message is being sent, add it to the recipient's queue
         if message_to_send:
-            recipient_key = f"agent:{nearby_agent['id']}:messages"
-            await redis.lpush(recipient_key, f"From Agent {agent['id']}: {message_to_send}")
-            logger.info(f"Sent message from Agent {agent['id']} to Agent {nearby_agent['id']}")
+            recipient_key = f"entity:{nearby_entity['id']}:messages"
+            await redis.lpush(recipient_key, f"From Entity {entity['id']}: {message_to_send}")
+            logger.info(f"Sent message from Entity {entity['id']} to Entity {nearby_entity['id']}")
 
     return received_messages
 
@@ -434,13 +434,13 @@ async def reset_simulation():
         await redis.flushdb()
         add_log("Redis database flushed successfully.")
         
-        # Initialize agents
-        agents = await initialize_agents()
-        add_log(f"Agents reinitialized successfully. Total agents: {len(agents)}")
+        # Initialize entities
+        entities = await intialize_entities()
+        add_log(f"Entities reinitialized successfully. Total entities: {len(entities)}")
         
         # Log successful reset
         add_log("Simulation reset completed successfully.")
-        return JSONResponse({"status": "Simulation reset successfully.", "agents": agents})
+        return JSONResponse({"status": "Simulation reset successfully.", "entities": entities})
     except Exception as e:
         # Log any error encountered during reset
         error_message = f"Error during simulation reset: {str(e)}"
@@ -458,13 +458,13 @@ async def initialize_simulation():
         stop_signal = False
         add_log("Stop signal reset to False.")
         
-        # Initialize agents
-        agents = await initialize_agents()
-        add_log(f"Agents initialized successfully. Total agents: {len(agents)}")
+        # Initialize Entities
+        entities = await intialize_entities()
+        add_log(f"Entities initialized successfully. Total Entities: {len(entities)}")
         
         # Log success and return the response
         add_log("Simulation started successfully.")
-        return JSONResponse({"status": "Simulation started successfully.", "agents": agents})
+        return JSONResponse({"status": "Simulation started successfully.", "entities": entities})
     except Exception as e:
         # Log and raise an error if the initialization fails
         error_message = f"Error during simulation initialization: {str(e)}"
@@ -487,84 +487,81 @@ async def perform_steps(request: StepRequest):
 
         for step in range(request.steps):
             if stop_signal:
-                logger.info("Stopping steps due to stop signal.")
                 add_log("Simulation steps halted by stop signal.")
                 break
 
-            # Fetch all agent keys dynamically from Redis
-            agent_keys = await redis.keys("agent:*")  # Match all agent keys
-            if not agent_keys:
-                logger.warning("No agents found in Redis!")
-                add_log("No agents found in Redis. Aborting simulation steps.")
-                return JSONResponse({"status": "No agents to process."})
+            # Fetch all entity keys dynamically from Redis
+            entity_keys = await redis.keys("entity:*")  # Match all entity keys
+            if not entity_keys:
+                add_log("No entities found in Redis. Aborting simulation steps.")
+                return JSONResponse({"status": "No entities to process."})
 
-            logger.info(f"Step {step + 1}: Found {len(agent_keys)} agents.")
-            add_log(f"Step {step + 1}: Found {len(agent_keys)} agents.")
+            logger.info(f"Step {step + 1}: Found {len(entity_keys)} entities.")
+            add_log(f"Step {step + 1}: Found {len(entity_keys)} entities.")
 
             # Filter keys to ensure only valid hashes are processed
-            valid_agent_keys = []
-            for key in agent_keys:
+            valid_entity_keys = []
+            for key in entity_keys:
                 key_type = await redis.type(key)
                 if key_type == "hash":
-                    valid_agent_keys.append(key)
+                    valid_entity_keys.append(key)
                 else:
-                    logger.warning(f"Skipping invalid key {key} of type {key_type}")
                     add_log(f"Skipping invalid key {key} of type {key_type}")
 
-            # Fetch agent data from Redis for all valid keys
-            agents = [
+            # Fetch entity data from Redis for all valid keys
+            entities = [
                 {
-                    "id": int(agent_data["id"]),
-                    "name": agent_data["name"],
-                    "x": int(agent_data["x"]),
-                    "y": int(agent_data["y"]),
-                    "memory": agent_data.get("memory", "")
+                    "id": int(entity_data["id"]),
+                    "name": entity_data["name"],
+                    "x": int(entity_data["x"]),
+                    "y": int(entity_data["y"]),
+                    "memory": entity_data.get("memory", "")
                 }
-                for agent_data in await asyncio.gather(*[redis.hgetall(key) for key in valid_agent_keys])
-                if agent_data  # Ensure we only include valid agent data
+                for entity_data in await asyncio.gather(*[redis.hgetall(key) for key in valid_entity_keys])
+                if entity_data  # Ensure we only include valid entity data
             ]
 
-            logger.info(f"Processing {len(agents)} agents.")
-            add_log(f"Processing {len(agents)} agents for step {step + 1}.")
+            logger.info(f"Processing {len(entities)} entities.")
+            add_log(f"Processing {len(entities)} entities for step {step + 1}.")
 
-            # Process incoming messages for each agent
-            for agent in agents:
+            # Process incoming messages for each entity
+            for entity in entities:
                 try:
                     # Fetch the existing message field
-                    message = await redis.hget(f"agent:{agent['id']}", "message")
+                    message = await redis.hget(f"entity:{entity['id']}", "message")
 
                     if message:
-                        logger.info(f"Agent {agent['id']} received message: {message}")
-                        add_log(f"Agent {agent['id']} received message: {message}")
+                        logger.info(f"Entity {entity['id']} received message: {message}")
+                        add_log(f"Entity {entity['id']} received message: {message}")
 
                         # Optionally update memory or trigger actions based on the message
-                        updated_memory = f"{agent['memory']} | Received: {message}"
-                        await redis.hset(f"agent:{agent['id']}", "memory", updated_memory)
+                        updated_memory = f"{entity['memory']} | Received: {message}"
+                        await redis.hset(f"entity:{entity['id']}", "memory", updated_memory)
 
                         # Clear the message field after processing (if required)
-                        await redis.hset(f"agent:{agent['id']}", "message", "")
+                        await redis.hset(f"entity:{entity['id']}", "message", "")
                 except Exception as e:
-                    logger.error(f"Error processing message for Agent {agent['id']}: {str(e)}")
-                    add_log(f"Error processing message for Agent {agent['id']}: {str(e)}")
+                    logger.error(f"Error processing message for Entity {entity['id']}: {str(e)}")
+                    add_log(f"Error processing message for Entity {entity['id']}: {str(e)}")
 
-            # Clear message queues only after processing all agents
-            for agent in agents:
-                await redis.delete(f"agent:{agent['id']}:messages")
+            # Clear message queues only after processing all entities
+            for entity in entities:
+                await redis.delete(f"entity:{entity['id']}:messages")
 
             # Message Generation
-            for agent in agents:
+            for entity in entities:
                 try:
-                    messages = await fetch_nearby_messages(agent, agents)
+                    messages = await fetch_nearby_messages(entity, entities)
                     message_prompt = prompts.get("message_generation_prompt", DEFAULT_MESSAGE_GENERATION_PROMPT)
                     message_result = await send_llm_request(
-                        construct_prompt(message_prompt, agent, messages)
+                        construct_prompt(message_prompt, entity, messages)
                     )
                     if "message" in message_result:
-                        await redis.hset(f"agent:{agent['id']}", "message", message_result["message"])
-                        add_log(f"Message generated for Agent {agent['id']}: {message_result['message']}")
+                        await redis.hset(f"entity:{entity['id']}", "message", message_result["message"])
+                        add_log(f"Message generated for Entity {entity['id']}: {message_result['message']}")
                 except Exception as e:
-                    logger.error(f"Error generating message for Agent {agent['id']}: {str(e)}")
-                    add_log(f"Error generating message for Agent {agent['id']}: {str(e)}")
+                    logger.error(f"Error generating message for Entity {entity['id']}: {str(e)}")
+                    add_log(f"Error generating message for Entity {entity['id']}: {str(e)}")
                 await asyncio.sleep(REQUEST_DELAY)
 
             if stop_signal:
@@ -573,19 +570,19 @@ async def perform_steps(request: StepRequest):
                 break
 
             # Memory Generation
-            for agent in agents:
+            for entity in entities:
                 try:
-                    messages = await fetch_nearby_messages(agent, agents)
+                    messages = await fetch_nearby_messages(entity, entities)
                     memory_prompt = prompts.get("memory_generation_prompt", DEFAULT_MEMORY_GENERATION_PROMPT)
                     memory_result = await send_llm_request(
-                        construct_prompt(memory_prompt, agent, messages)
+                        construct_prompt(memory_prompt, entity, messages)
                     )
                     if "memory" in memory_result:
-                        await redis.hset(f"agent:{agent['id']}", "memory", memory_result["memory"])
-                        add_log(f"Memory updated for Agent {agent['id']}: {memory_result['memory']}")
+                        await redis.hset(f"entity:{entity['id']}", "memory", memory_result["memory"])
+                        add_log(f"Memory updated for Entity {entity['id']}: {memory_result['memory']}")
                 except Exception as e:
-                    logger.error(f"Error generating memory for Agent {agent['id']}: {str(e)}")
-                    add_log(f"Error generating memory for Agent {agent['id']}: {str(e)}")
+                    logger.error(f"Error generating memory for Entity {entity['id']}: {str(e)}")
+                    add_log(f"Error generating memory for Entity {entity['id']}: {str(e)}")
                 await asyncio.sleep(REQUEST_DELAY)
 
             if stop_signal:
@@ -594,41 +591,41 @@ async def perform_steps(request: StepRequest):
                 break
 
             # Movement Generation
-            for agent in agents:
+            for entity in entities:
                 try:
                     movement_prompt = prompts.get("movement_generation_prompt", DEFAULT_MOVEMENT_GENERATION_PROMPT)
                     movement_result = await send_llm_request(
-                        construct_prompt(movement_prompt, agent, [])
+                        construct_prompt(movement_prompt, entity, [])
                     )
                     if "movement" in movement_result:
                         movement = movement_result["movement"].strip().lower()
-                        initial_position = (agent["x"], agent["y"])
+                        initial_position = (entity["x"], entity["y"])
 
                         # Apply movement logic
                         if movement == "x+1":
-                            agent["x"] = (agent["x"] + 1) % GRID_SIZE
+                            entity["x"] = (entity["x"] + 1) % GRID_SIZE
                         elif movement == "x-1":
-                            agent["x"] = (agent["x"] - 1) % GRID_SIZE
+                            entity["x"] = (entity["x"] - 1) % GRID_SIZE
                         elif movement == "y+1":
-                            agent["y"] = (agent["y"] + 1) % GRID_SIZE
+                            entity["y"] = (entity["y"] + 1) % GRID_SIZE
                         elif movement == "y-1":
-                            agent["y"] = (agent["y"] - 1) % GRID_SIZE
+                            entity["y"] = (entity["y"] - 1) % GRID_SIZE
                         elif movement == "stay":
-                            logger.info(f"Agent {agent['id']} stays in place at {initial_position}.")
-                            add_log(f"Agent {agent['id']} stays in place at {initial_position}.")
+                            logger.info(f"Entity {entity['id']} stays in place at {initial_position}.")
+                            add_log(f"Entity {entity['id']} stays in place at {initial_position}.")
                             continue
                         else:
-                            logger.warning(f"Invalid movement command for Agent {agent['id']}: {movement}")
-                            add_log(f"Invalid movement command for Agent {agent['id']}: {movement}")
+                            logger.warning(f"Invalid movement command for Entity {entity['id']}: {movement}")
+                            add_log(f"Invalid movement command for Entity {entity['id']}: {movement}")
                             continue
 
                         # Log and update position
-                        logger.info(f"Agent {agent['id']} moved from {initial_position} to ({agent['x']}, {agent['y']}) with action '{movement}'.")
-                        add_log(f"Agent {agent['id']} moved from {initial_position} to ({agent['x']}, {agent['y']}) with action '{movement}'.")
-                        await redis.hset(f"agent:{agent['id']}", mapping={"x": agent["x"], "y": agent["y"]})
+                        logger.info(f"Entity {entity['id']} moved from {initial_position} to ({entity['x']}, {entity['y']}) with action '{movement}'.")
+                        add_log(f"Entity {entity['id']} moved from {initial_position} to ({entity['x']}, {entity['y']}) with action '{movement}'.")
+                        await redis.hset(f"entity:{entity['id']}", mapping={"x": entity["x"], "y": entity["y"]})
                 except Exception as e:
-                    logger.error(f"Error generating movement for Agent {agent['id']}: {str(e)}")
-                    add_log(f"Error generating movement for Agent {agent['id']}: {str(e)}")
+                    logger.error(f"Error generating movement for Entity {entity['id']}: {str(e)}")
+                    add_log(f"Error generating movement for Entity {entity['id']}: {str(e)}")
                 await asyncio.sleep(REQUEST_DELAY)
 
         logger.info(f"Completed {request.steps} step(s).")
@@ -660,144 +657,144 @@ async def stop_simulation():
         raise HTTPException(status_code=500, detail=error_message)
 
 
-@app.post("/agents", response_model=Agent, tags=["Agents"])
-async def create_agent(agent: Agent):
-    agent_key = f"agent:{agent.id}"
+@app.post("/entities", response_model=Entity, tags=["Entities"])
+async def create_entity(entity: Entity):
+    entity_key = f"entity:{entity.id}"
 
     try:
-        # Log the attempt to create a new agent
-        add_log(f"Attempting to create new agent with ID {agent.id} and name '{agent.name}'.")
+        # Log the attempt to create a new entity
+        add_log(f"Attempting to create new entity with ID {entity.id} and name '{entity.name}'.")
 
         # Check if the ID already exists in Redis
-        if await redis.exists(agent_key):
-            error_message = f"Agent ID {agent.id} already exists in Redis."
+        if await redis.exists(entity_key):
+            error_message = f"Entity ID {entity.id} already exists in Redis."
             add_log(error_message)
             raise HTTPException(status_code=400, detail=error_message)
 
         # Check if the ID already exists in Supabase
-        existing_agent = supabase.table("agents").select("id").eq("id", agent.id).execute()
-        if existing_agent.data:
-            error_message = f"Agent ID {agent.id} already exists in Supabase."
+        existing_entity = supabase.table("entities").select("id").eq("id", entity.id).execute()
+        if existing_entity.data:
+            error_message = f"Entity ID {entity.id} already exists in Supabase."
             add_log(error_message)
             raise HTTPException(status_code=400, detail=error_message)
 
-        # Save agent data in Redis
-        await redis.hset(agent_key, mapping=agent.dict())
-        add_log(f"Agent data for ID {agent.id} saved in Redis.")
+        # Save entity data in Redis
+        await redis.hset(entity_key, mapping=entity.dict())
+        add_log(f"Entity data for ID {entity.id} saved in Redis.")
 
-        # Add the agent key to the Redis list
-        await redis.lpush("agent_keys", agent_key)
-        add_log(f"Agent key for ID {agent.id} added to Redis agent_keys list.")
+        # Add the entity key to the Redis list
+        await redis.lpush("entity_keys", entity_key)
+        add_log(f"Entity key for ID {entity.id} added to Redis entity_keys list.")
 
-        # Save the agent in Supabase
-        supabase.table("agents").insert(agent.dict()).execute()
-        add_log(f"Agent data for ID {agent.id} saved in Supabase.")
+        # Save the entity in Supabase
+        supabase.table("entities").insert(entity.dict()).execute()
+        add_log(f"Entity data for ID {entity.id} saved in Supabase.")
 
-        # Log the successful creation of the agent
-        add_log(f"New agent created successfully: ID={agent.id}, Name={agent.name}, Position=({agent.x}, {agent.y})")
+        # Log the successful creation of the entity
+        add_log(f"New entity created successfully: ID={entity.id}, Name={entity.name}, Position=({entity.x}, {entity.y})")
         
-        return agent
+        return entity
 
     except Exception as e:
         # Log and raise unexpected errors
-        error_message = f"Error creating agent with ID {agent.id}: {str(e)}"
+        error_message = f"Error creating entity with ID {entity.id}: {str(e)}"
         add_log(error_message)
         raise HTTPException(status_code=500, detail=error_message)
 
 
-@app.get("/agents/{agent_id}", response_model=Agent, tags=["Agents"])
-async def get_agent(agent_id: int):
-    # Log the attempt to fetch agent data
-    add_log(f"Fetching data for agent with ID {agent_id}.")
+@app.get("/entities/{entity_id}", response_model=Entity, tags=["Entities"])
+async def get_entity(entity_id: int):
+    # Log the attempt to fetch entity data
+    add_log(f"Fetching data for entity with ID {entity_id}.")
 
-    # Fetch agent data from Redis
-    agent_data = await redis.hgetall(f"agent:{agent_id}")
-    if not agent_data:
-        error_message = f"Agent with ID {agent_id} not found."
+    # Fetch entity data from Redis
+    entity_data = await redis.hgetall(f"entity:{entity_id}")
+    if not entity_data:
+        error_message = f"Entity with ID {entity_id} not found."
         add_log(error_message)
         raise HTTPException(status_code=404, detail=error_message)
 
-    # Convert Redis data into an Agent model (ensure proper types are cast)
+    # Convert Redis data into an Entity model (ensure proper types are cast)
     try:
-        agent = Agent(
-            id=agent_id,
-            name=agent_data.get("name"),
-            x=int(agent_data.get("x")),
-            y=int(agent_data.get("y")),
-            memory=agent_data.get("memory", "")
+        entity = Entity(
+            id=entity_id,
+            name=entity_data.get("name"),
+            x=int(entity_data.get("x")),
+            y=int(entity_data.get("y")),
+            memory=entity_data.get("memory", "")
         )
-        add_log(f"Successfully fetched agent with ID {agent_id}, Name: {agent.name}, Position: ({agent.x}, {agent.y}).")
-        return agent
+        add_log(f"Successfully fetched entity with ID {entity_id}, Name: {entity.name}, Position: ({entity.x}, {entity.y}).")
+        return entity
     except Exception as e:
-        error_message = f"Failed to parse data for agent ID {agent_id}: {str(e)}"
+        error_message = f"Failed to parse data for entity ID {entity_id}: {str(e)}"
         add_log(error_message)
         raise HTTPException(status_code=500, detail=error_message)
 
-@app.put("/agents/{agent_id}", response_model=Agent, tags=["Agents"])
-async def update_agent(agent_id: int, agent: Agent):
+@app.put("/entities/{entity_id}", response_model=Entity, tags=["Entities"])
+async def update_entity(entity_id: int, entity: Entity):
     try:
-        # Log the attempt to update agent data
-        add_log(f"Attempting to update agent with ID {agent_id}.")
+        # Log the attempt to update entity data
+        add_log(f"Attempting to update entity with ID {entity_id}.")
 
-        # Update agent data in Redis
-        await redis.hset(f"agent:{agent_id}", mapping=agent.dict())
-        add_log(f"Agent with ID {agent_id} updated in Redis.")
+        # Update entity data in Redis
+        await redis.hset(f"entity:{entity_id}", mapping=entity.dict())
+        add_log(f"Entity with ID {entity_id} updated in Redis.")
 
-        # Update agent in Supabase
-        supabase.table("agents").update(agent.dict()).eq("id", agent_id).execute()
-        add_log(f"Agent with ID {agent_id} updated in Supabase.")
+        # Update entity in Supabase
+        supabase.table("entities").update(entity.dict()).eq("id", entity_id).execute()
+        add_log(f"Entity with ID {entity_id} updated in Supabase.")
 
         # Log successful update
-        add_log(f"Successfully updated agent with ID {agent_id}.")
-        return agent
+        add_log(f"Successfully updated entity with ID {entity_id}.")
+        return entity
     except Exception as e:
         # Log and raise error if update fails
-        error_message = f"Error updating agent with ID {agent_id}: {str(e)}"
+        error_message = f"Error updating entity with ID {entity_id}: {str(e)}"
         add_log(error_message)
         raise HTTPException(status_code=500, detail=error_message)
 
-@app.delete("/agents/{agent_id}", tags=["Agents"])
-async def delete_agent(agent_id: int):
-    agent_key = f"agent:{agent_id}"
+@app.delete("/entities/{entity_id}", tags=["Entities"])
+async def delete_entity(entity_id: int):
+    entity_key = f"entity:{entity_id}"
     try:
-        # Log the attempt to delete an agent
-        add_log(f"Attempting to delete agent with ID {agent_id}.")
+        # Log the attempt to delete an entity
+        add_log(f"Attempting to delete entity with ID {entity_id}.")
 
-        # Delete agent from Redis
-        await redis.delete(agent_key)
-        add_log(f"Agent with ID {agent_id} deleted from Redis.")
+        # Delete entity from Redis
+        await redis.delete(entity_key)
+        add_log(f"Entity with ID {entity_id} deleted from Redis.")
 
         # Remove the key from the Redis list
-        await redis.lrem("agent_keys", 0, agent_key)
-        add_log(f"Agent key with ID {agent_id} removed from Redis agent_keys list.")
+        await redis.lrem("entity_keys", 0, entity_key)
+        add_log(f"Entity key with ID {entity_id} removed from Redis entity_keys list.")
 
-        # Optionally, delete the agent from Supabase
-        supabase.table("agents").delete().eq("id", agent_id).execute()
-        add_log(f"Agent with ID {agent_id} deleted from Supabase.")
+        # Optionally, delete the entity from Supabase
+        supabase.table("entities").delete().eq("id", entity_id).execute()
+        add_log(f"Entity with ID {entity_id} deleted from Supabase.")
 
-        return {"status": "Agent deleted successfully"}
+        return {"status": "Entity deleted successfully"}
     except Exception as e:
         # Log and raise any unexpected errors
-        error_message = f"Error deleting agent with ID {agent_id}: {str(e)}"
+        error_message = f"Error deleting entity with ID {entity_id}: {str(e)}"
         add_log(error_message)
         raise HTTPException(status_code=500, detail=error_message)
 
 from fastapi import Query
 
-@app.post("/agents/{recipient_id}/create_memory", tags=["Utilities"])
+@app.post("/entities/{recipient_id}/create_memory", tags=["Utilities"])
 async def create_memory(
     recipient_id: int,
-    message: str = Query(..., description="The memory content to add or update for the recipient agent.")
+    message: str = Query(..., description="The memory content to add or update for the recipient entity.")
 ):
-    recipient_key = f"agent:{recipient_id}"
+    recipient_key = f"entity:{recipient_id}"
 
     try:
         # Log the attempt to create memory
-        add_log(f"Creating a memory for Agent {recipient_id}: \"{message}\".")
+        add_log(f"Creating a memory for Entity {recipient_id}: \"{message}\".")
 
         # Validate that the recipient exists
         if not await redis.exists(recipient_key):
-            error_message = f"Recipient Agent ID {recipient_id} not found."
+            error_message = f"Recipient Entity ID {recipient_id} not found."
             add_log(error_message)
             raise HTTPException(status_code=404, detail=error_message)
 
@@ -812,71 +809,71 @@ async def create_memory(
 
         # Update the recipient's memory field
         await redis.hset(recipient_key, "memory", updated_memory)
-        add_log(f"Memory updated successfully for Agent {recipient_id}: \"{message}\".")
+        add_log(f"Memory updated successfully for Entity {recipient_id}: \"{message}\".")
 
         return {"status": "Memory updated successfully", "message": message}
 
     except Exception as e:
         # Log and raise any unexpected errors
-        error_message = f"Error creating memory for Agent {recipient_id}: {str(e)}"
+        error_message = f"Error creating memory for Entity {recipient_id}: {str(e)}"
         add_log(error_message)
         raise HTTPException(status_code=500, detail=error_message)
 
-@app.get("/agents/{agent_id}/nearby", response_model=List[Agent], tags=["Utilities"])
-async def get_nearby_agents(agent_id: int):
+@app.get("/entities/{entity_id}/nearby", response_model=List[Entity], tags=["Utilities"])
+async def get_nearby_entities(entity_id: int):
     try:
-        # Log the attempt to fetch nearby agents
-        add_log(f"Fetching nearby agents for Agent ID {agent_id}.")
+        # Log the attempt to fetch nearby entities
+        add_log(f"Fetching nearby entities for Entity ID {entity_id}.")
 
-        # Get the agent's position from Redis
-        agent_data = await redis.hgetall(f"agent:{agent_id}")
-        if not agent_data:
-            error_message = f"Agent with ID {agent_id} not found."
+        # Get the entity's position from Redis
+        entity_data = await redis.hgetall(f"entity:{entity_id}")
+        if not entity_data:
+            error_message = f"Entity with ID {entity_id} not found."
             add_log(error_message)
             raise HTTPException(status_code=404, detail=error_message)
 
-        agent = Agent(**agent_data)
+        entity = Entity(**entity_data)
 
-        # Fetch all agents except the current one
-        all_agents = [
-            Agent(**await redis.hgetall(f"agent:{i}"))
-            for i in range(NUM_AGENTS) if i != agent_id
+        # Fetch all entities except the current one
+        all_entities = [
+            Entity(**await redis.hgetall(f"entity:{i}"))
+            for i in range(NUM_ENTITIES) if i != entity_id
         ]
 
-        # Filter nearby agents based on Chebyshev distance
-        nearby_agents = [
-            a for a in all_agents
-            if chebyshev_distance(agent.x, agent.y, a.x, a.y) <= CHEBYSHEV_DISTANCE
+        # Filter nearby entities based on Chebyshev distance
+        nearby_entities = [
+            a for a in all_entities
+            if chebyshev_distance(entity.x, entity.y, a.x, a.y) <= CHEBYSHEV_DISTANCE
         ]
 
-        add_log(f"Nearby agents fetched successfully for Agent ID {agent_id}. Total nearby agents: {len(nearby_agents)}.")
-        return nearby_agents
+        add_log(f"Nearby entities fetched successfully for Entity ID {entity_id}. Total nearby entities: {len(nearby_entities)}.")
+        return nearby_entities
     except Exception as e:
         # Log and raise any unexpected errors
-        error_message = f"Error fetching nearby agents for Agent ID {agent_id}: {str(e)}"
+        error_message = f"Error fetching nearby entities for Entity ID {entity_id}: {str(e)}"
         add_log(error_message)
         raise HTTPException(status_code=500, detail=error_message)
 
-@app.post("/sync_agents", tags=["Utilities"])
-async def sync_agents():
+@app.post("/sync_entity", tags=["Utilities"])
+async def sync_entity():
     try:
         # Log the start of the synchronization process
         add_log("Synchronization process initiated between Redis and Supabase.")
 
-        all_agents = [
-            Agent(**await redis.hgetall(f"agent:{i}"))
-            for i in range(NUM_AGENTS)
+        all_entities = [
+            Entity(**await redis.hgetall(f"entity:{i}"))
+            for i in range(NUM_ENTITIES)
         ]
 
-        for agent in all_agents:
-            supabase.table("agents").upsert(agent.dict()).execute()
-            add_log(f"Agent with ID {agent.id} synchronized to Supabase.")
+        for entity in all_entities:
+            supabase.table("entities").upsert(entity.dict()).execute()
+            add_log(f"Entity with ID {entity.id} synchronized to Supabase.")
 
         add_log("Synchronization process completed successfully.")
-        return {"status": "Agents synchronized between Redis and Supabase"}
+        return {"status": "Entities synchronized between Redis and Supabase"}
     except Exception as e:
         # Log and raise any unexpected errors
-        error_message = f"Error during agent synchronization: {str(e)}"
+        error_message = f"Error during entity synchronization: {str(e)}"
         add_log(error_message)
         raise HTTPException(status_code=500, detail=error_message)
 
@@ -886,17 +883,17 @@ async def get_settings():
         # Log the attempt to fetch simulation settings
         add_log("Fetching simulation settings.")
 
-        # Fetch all agent keys from Redis
-        agent_keys = await redis.keys("agent:*")  # Get all keys matching agent pattern
-        num_agents = len(agent_keys)  # Count the number of agents
+        # Fetch all entity keys from Redis
+        entity_keys = await redis.keys("entity:*")  # Get all keys matching entity pattern
+        num_entities = len(entity_keys)  # Count the number of entities
 
         # Log successful retrieval
-        add_log(f"Simulation settings fetched successfully. Total agents: {num_agents}.")
+        add_log(f"Simulation settings fetched successfully. Total entities: {num_entities}.")
         
-        # Return the dynamically updated number of agents
+        # Return the dynamically updated number of entities
         return SimulationSettings(
             grid_size=GRID_SIZE,
-            num_agents=num_agents,
+            num_entities=num_entities,
             max_steps=MAX_STEPS,
             chebyshev_distance=CHEBYSHEV_DISTANCE,
             llm_model=LLM_MODEL,
@@ -917,11 +914,11 @@ async def set_settings(settings: SimulationSettings):
         # Log the attempt to update simulation settings
         add_log("Updating simulation settings.")
 
-        global GRID_SIZE, NUM_AGENTS, MAX_STEPS, CHEBYSHEV_DISTANCE, LLM_MODEL
+        global GRID_SIZE, NUM_ENTITIES, MAX_STEPS, CHEBYSHEV_DISTANCE, LLM_MODEL
         global LLM_MAX_TOKENS, LLM_TEMPERATURE, REQUEST_DELAY, MAX_CONCURRENT_REQUESTS
 
         GRID_SIZE = settings.grid_size
-        NUM_AGENTS = settings.num_agents
+        NUM_ENTITIES = settings.num_entities
         MAX_STEPS = settings.max_steps
         CHEBYSHEV_DISTANCE = settings.chebyshev_distance
         LLM_MODEL = settings.llm_model
