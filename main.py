@@ -1,9 +1,12 @@
 import os
 import random
 import asyncio
-from typing import List, Dict
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from typing import List
+from fastapi import FastAPI, HTTPException, WebSocket, Query
+from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.exceptions import HTTPException
+from fastapi.staticfiles import StaticFiles
+from fastapi.openapi.docs import get_swagger_ui_html
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from redis.asyncio import Redis
@@ -13,6 +16,9 @@ import logging
 from asyncio import Semaphore
 from contextlib import asynccontextmanager
 from typing import List
+import traceback
+from collections import deque
+from datetime import datetime
 
 from config import (
     SUPABASE_URL,
@@ -39,25 +45,8 @@ from config import (
 
 load_dotenv()
 
-
-# Environment Variables
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_API_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
-REDIS_ENDPOINT = "cute-crawdad-25113.upstash.io"
-REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
-
-# Simulation Configuration (Initial Defaults)
-GRID_SIZE = 30  # 30x30 grid
-NUM_AGENTS = 10
-MAX_STEPS = 100
-CHEBYSHEV_DISTANCE = 5
-LLM_MODEL = "llama-3.2-11b-vision-preview"
-LLM_MAX_TOKENS = 2048
-LLM_TEMPERATURE = 0.7
-REQUEST_DELAY = 2.2  # Fixed delay in seconds between requests
-MAX_CONCURRENT_REQUESTS = 5  # Limit concurrent requests to prevent rate limiting
+# Global log queue for real-time logging
+LOG_QUEUE = deque(maxlen=200)  # Keeps the last 200 log messages
 
 # Define the configuration model
 class SimulationSettings(BaseModel):
@@ -77,7 +66,7 @@ class SimulationSettings(BaseModel):
     num_agents: int = 10
     max_steps: int = 100
     chebyshev_distance: int = 5
-    llm_model: str = "llama-3.2-11b-vision-preview"
+    llm_model: str = "llama-3.1-8b-instant"
     llm_max_tokens: int = 2048
     llm_temperature: float = 0.7
     request_delay: float = 2.2
@@ -121,31 +110,6 @@ stop_signal = False
 def chebyshev_distance(x1, y1, x2, y2):
     return max(abs(x1 - x2), abs(y1 - y2))
 
-# Prompt Templates
-GRID_DESCRIPTION = "The field size is 30 x 30 with periodic boundary conditions, and there are a total of 10 beings. You are free to move around the field and converse with other beings."
-
-DEFAULT_MESSAGE_GENERATION_PROMPT = """
-[INST]
-You are being{agentId} at position ({x}, {y}). {grid_description} You have a summary memory of the situation so far: {memory}. You received messages from the surrounding beings: {messages}. Based on the above, you send a message to the surrounding beings. Your message will reach beings up to distance {distance} away. What message do you send?
-Respond with only the message content, and nothing else.
-[/INST]
-"""
-
-DEFAULT_MEMORY_GENERATION_PROMPT = """
-[INST]
-You are being{agentId} at position ({x}, {y}). {grid_description} You have a summary memory of the situation so far: {memory}. You received messages from the surrounding beings: {messages}. Based on the above, summarize the situation you and the other beings have been in so far for you to remember.
-Respond with only the summary, and nothing else.
-[/INST]
-"""
-
-DEFAULT_MOVEMENT_GENERATION_PROMPT = """
-[INST]
-You are being{agentId} at position ({x}, {y}). {grid_description} You have a summary memory of the situation so far: {memory}.
-Based on the above, choose your next move. Respond with only one of the following options, and nothing else: "x+1", "x-1", "y+1", "y-1", or "stay".
-Do not provide any explanation or additional text.
-[/INST]
-"""
-
 # Data Models
 class StepRequest(BaseModel):
     steps: int
@@ -174,6 +138,13 @@ async def fetch_prompts_from_fastapi():
         else:
             logger.warning("Failed to fetch prompts, using default ones.")
             return {}  # Return an empty dict to trigger the default prompts
+        
+# Helper Function to add logs to the queue
+def add_log(message: str):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    formatted_message = f"[{timestamp}] {message}"
+    LOG_QUEUE.append(formatted_message)
+    logger.info(formatted_message)  # Log to the standard logger as well
         
 # Chebyshev Distance Helper Function for calculating the distance for Nearby Agents function.
 def chebyshev_distance(x1, y1, x2, y2):
@@ -226,10 +197,10 @@ async def send_llm_request(prompt, max_retries=3, base_delay=2):
                     if "What message do you send?" in prompt:
                         await asyncio.sleep(REQUEST_DELAY)
                         return {"message": content}
-                    elif "summarize the situation" in prompt:
+                    elif "create a summary" in prompt:
                         await asyncio.sleep(REQUEST_DELAY)
                         return {"memory": content}
-                    elif "choose your next move" in prompt:
+                    elif "decide your next move" in prompt:
                         # Extract movement command
                         valid_commands = ["x+1", "x-1", "y+1", "y-1", "stay"]
                         content_lower = content.lower()
@@ -323,347 +294,721 @@ async def lifespan(app: FastAPI):
         logger.info("Redis connection closed.")
 
 # Create FastAPI app with lifespan
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(
+    title="DevAGI Designer", 
+    version="0.0.3", 
+    description="API for world simulation and managing WebSocket logs.",
+    docs_url=None, 
+    lifespan=lifespan)
+
+# Serve static files
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/docs", tags=["Simulation"], include_in_schema=False)
+async def custom_swagger_ui_html():
+    logger.info("Custom /docs endpoint is being served")  # Logs when /docs is accessed
+    html = get_swagger_ui_html(
+        openapi_url=app.openapi_url,
+        title="FastAPI - WebSocket Integration",
+    )
+
+    custom_script = '<script src="/static/js/websocket_client.js"></script>'
+    log_area = '''
+        <div class="opblock opblock-get" id="websocket-logs-section" style="margin-top: 20px; max-width: 1400px; margin: auto;">
+            <div class="opblock-summary opblock-summary-get">
+                <button
+                    aria-expanded="true"
+                    class="opblock-summary-control"
+                    style="display: flex; align-items: center; justify-content: space-between; width: 100%; border: none; background: none; padding: 10px 15px; cursor: pointer; font-weight: bold; font-size: 14px;"
+                    onclick="toggleLogSection()"
+                >
+                    <span>MetaStrata Logs</span>
+                    <span style="font-size: 18px;">&#x25B2;</span>
+                </button>
+            </div>
+            <div id="websocket-logs-container" class="opblock-body" style="display: block; padding: 10px; background-color: #f6f6f6; border: 1px solid #e8e8e8; border-radius: 4px;">
+                <div id="websocket-controls" style="text-align: center; margin-bottom: 10px;">
+                    <button id="clear-logs" style="margin-right: 10px; padding: 5px 10px; border-radius: 5px; background-color: #f44336; color: white; border: none; cursor: pointer;">
+                        Clear Logs
+                    </button>
+                    <button id="select-all" style="padding: 5px 10px; border-radius: 5px; background-color: #4caf50; color: white; border: none; cursor: pointer;">
+                        Select All
+                    </button>
+                </div>
+                <div id="websocket-logs" style="background: #f9f9f9; padding: 10px; height: 700px; overflow-y: auto; border: 1px solid #ccc; border-radius: 5px">
+                    <p>WebSocket logs will appear here...</p>
+                </div>
+            </div>
+        </div>
+    '''
+    custom_script += '''
+        <script>
+            function toggleLogSection() {
+                const container = document.getElementById('websocket-logs-container');
+                const button = container.previousElementSibling.querySelector('span:nth-child(2)');
+                if (container.style.display === 'none') {
+                    container.style.display = 'block';
+                    button.innerHTML = '&#x25B2;';
+                } else {
+                    container.style.display = 'none';
+                    button.innerHTML = '&#x25BC;';
+                }
+            }
+
+            // Automatically collapse the schemas section and open WebSocket logs on page load
+            document.addEventListener("DOMContentLoaded", function() {
+                // Collapse the schemas section
+                const schemasSummary = document.querySelector("section.models.is-open .models-summary");
+                if (schemasSummary) {
+                    schemasSummary.click(); // Simulates a click to collapse it
+                }
+
+                // Open the WebSocket logs section
+                const logsContainer = document.getElementById("websocket-logs-container");
+                const logsButton = logsContainer.previousElementSibling.querySelector('span:nth-child(2)');
+                if (logsContainer && logsButton) {
+                    logsContainer.style.display = 'block';
+                    logsButton.innerHTML = '&#x25B2;'; // Ensure the arrow points up
+                }
+
+                // Add event listener for the clear logs button
+                const clearLogsButton = document.getElementById("clear-logs");
+                const logsDiv = document.getElementById("websocket-logs");
+
+                if (clearLogsButton) {
+                    clearLogsButton.addEventListener("click", function() {
+                        if (logsDiv) {
+                            logsDiv.innerHTML = ""; // Clear the logs
+                            logsDiv.innerHTML = "<p>WebSocket logs will appear here...</p>"; // Reset placeholder
+                        }
+                    });
+                }
+
+                // Add event listener for the select all button
+                const selectAllButton = document.getElementById("select-all");
+                if (selectAllButton) {
+                    selectAllButton.addEventListener("click", function() {
+                        const range = document.createRange();
+                        range.selectNodeContents(logsDiv);
+                        const selection = window.getSelection();
+                        selection.removeAllRanges();
+                        selection.addRange(range);
+                    });
+                }
+            });
+        </script>
+    '''
+    modified_html = html.body.decode("utf-8").replace("</body>", f"{custom_script}{log_area}</body>")
+    
+    return HTMLResponse(modified_html)
+
+@app.exception_handler(HTTPException)
+async def custom_http_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"message": f"Custom Error: {exc.detail}"}
+    )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    # Log the exception details for debugging
+    logger.error(f"Unhandled exception: {str(exc)}\n{traceback.format_exc()}")
+
+    return JSONResponse(
+        status_code=500,
+        content={"message": "An unexpected error occurred. Please try again later."}
+    )
 
 # Simulation API Endpoints
-@app.post("/reset")
+@app.post("/reset", tags=["World Simulation"])
 async def reset_simulation():
     global stop_signal
-    stop_signal = False  # Reset stop signal before starting
-    await redis.flushdb()
-    agents = await initialize_agents()
-    return JSONResponse({"status": "Simulation reset successfully.", "agents": agents})
+    try:
+        # Log reset initiation
+        add_log("Reset simulation process initiated.")
+        
+        stop_signal = False  # Reset stop signal before starting
+        add_log("Stop signal reset to False.")
+        
+        # Clear Redis database
+        await redis.flushdb()
+        add_log("Redis database flushed successfully.")
+        
+        # Initialize agents
+        agents = await initialize_agents()
+        add_log(f"Agents reinitialized successfully. Total agents: {len(agents)}")
+        
+        # Log successful reset
+        add_log("Simulation reset completed successfully.")
+        return JSONResponse({"status": "Simulation reset successfully.", "agents": agents})
+    except Exception as e:
+        # Log any error encountered during reset
+        error_message = f"Error during simulation reset: {str(e)}"
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
 
-@app.post("/start")
-async def start_simulation():
+@app.post("/initialize", tags=["World Simulation"])
+async def initialize_simulation():
     global stop_signal
-    stop_signal = False  # Reset stop signal before starting
-    agents = await initialize_agents()
-    return JSONResponse({"status": "Simulation started successfully.", "agents": agents})
+    try:
+        # Log the initiation of the simulation
+        add_log("Simulation initialization process started.")
+        
+        # Reset the stop signal
+        stop_signal = False
+        add_log("Stop signal reset to False.")
+        
+        # Initialize agents
+        agents = await initialize_agents()
+        add_log(f"Agents initialized successfully. Total agents: {len(agents)}")
+        
+        # Log success and return the response
+        add_log("Simulation started successfully.")
+        return JSONResponse({"status": "Simulation started successfully.", "agents": agents})
+    except Exception as e:
+        # Log and raise an error if the initialization fails
+        error_message = f"Error during simulation initialization: {str(e)}"
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
 
-@app.post("/step")
+@app.post("/step", tags=["World Simulation"])
 async def perform_steps(request: StepRequest):
     global stop_signal
     stop_signal = False  # Reset stop signal before starting steps
 
-    # Fetch the current prompt templates from FastAPI
-    prompts = await fetch_prompts_from_fastapi()
+    try:
+        add_log(f"Simulation steps requested: {request.steps} step(s).")
+        
+        # Fetch the current prompt templates from FastAPI
+        prompts = await fetch_prompts_from_fastapi()
+        add_log("Fetched prompt templates successfully.")
 
-    logger.info("Starting simulation steps...")
+        logger.info("Starting simulation steps...")
 
-    for step in range(request.steps):
-        if stop_signal:
-            logger.info("Stopping steps due to stop signal.")
-            break
+        for step in range(request.steps):
+            if stop_signal:
+                logger.info("Stopping steps due to stop signal.")
+                add_log("Simulation steps halted by stop signal.")
+                break
 
-        # Fetch all agent keys dynamically from Redis
-        agent_keys = await redis.keys("agent:*")  # Match all agent keys
-        if not agent_keys:
-            logger.warning("No agents found in Redis!")
-            return JSONResponse({"status": "No agents to process."})
+            # Fetch all agent keys dynamically from Redis
+            agent_keys = await redis.keys("agent:*")  # Match all agent keys
+            if not agent_keys:
+                logger.warning("No agents found in Redis!")
+                add_log("No agents found in Redis. Aborting simulation steps.")
+                return JSONResponse({"status": "No agents to process."})
 
-        logger.info(f"Step {step + 1}: Found {len(agent_keys)} agents.")
+            logger.info(f"Step {step + 1}: Found {len(agent_keys)} agents.")
+            add_log(f"Step {step + 1}: Found {len(agent_keys)} agents.")
 
-        # Filter keys to ensure only valid hashes are processed
-        valid_agent_keys = []
-        for key in agent_keys:
-            key_type = await redis.type(key)
-            if key_type == "hash":
-                valid_agent_keys.append(key)
-            else:
-                logger.warning(f"Skipping invalid key {key} of type {key_type}")
-
-        # Fetch agent data from Redis for all valid keys
-        agents = [
-            {
-                "id": int(agent_data["id"]),
-                "name": agent_data["name"],
-                "x": int(agent_data["x"]),
-                "y": int(agent_data["y"]),
-                "memory": agent_data.get("memory", "")
-            }
-            for agent_data in await asyncio.gather(*[redis.hgetall(key) for key in valid_agent_keys])
-            if agent_data  # Ensure we only include valid agent data
-        ]
-
-        logger.info(f"Processing {len(agents)} agents.")
-
-        # Process incoming messages for each agent
-        for agent in agents:
-            # Fetch the existing message field
-            message = await redis.hget(f"agent:{agent['id']}", "message")
-            
-            if message:
-                logger.info(f"Agent {agent['id']} received message: {message}")
-
-                # Optionally update memory or trigger actions based on the message
-                updated_memory = f"{agent['memory']} | Received: {message}"
-                await redis.hset(f"agent:{agent['id']}", "memory", updated_memory)
-
-                # Clear the message field after processing (if required)
-                await redis.hset(f"agent:{agent['id']}", "message", "")
-
-        # Clear message queues only after processing all agents
-        for agent in agents:
-            await redis.delete(f"agent:{agent['id']}:messages")
-
-
-        # Message Generation
-        for agent in agents:
-            messages = await fetch_nearby_messages(agent, agents)
-            message_prompt = prompts.get("message_generation_prompt", DEFAULT_MESSAGE_GENERATION_PROMPT)
-            message_result = await send_llm_request(
-                construct_prompt(message_prompt, agent, messages)
-            )
-            if "message" in message_result:
-                await redis.hset(f"agent:{agent['id']}", "message", message_result["message"])
-            await asyncio.sleep(REQUEST_DELAY)
-
-        if stop_signal:
-            logger.info("Stopping after message generation due to stop signal.")
-            break
-
-        # Memory Generation
-        for agent in agents:
-            messages = await fetch_nearby_messages(agent, agents)
-            memory_prompt = prompts.get("memory_generation_prompt", DEFAULT_MEMORY_GENERATION_PROMPT)
-            memory_result = await send_llm_request(
-                construct_prompt(memory_prompt, agent, messages)
-            )
-            if "memory" in memory_result:
-                await redis.hset(f"agent:{agent['id']}", "memory", memory_result["memory"])
-            await asyncio.sleep(REQUEST_DELAY)
-
-        if stop_signal:
-            logger.info("Stopping after memory generation due to stop signal.")
-            break
-
-        # Movement Generation
-        for agent in agents:
-            movement_prompt = prompts.get("movement_generation_prompt", DEFAULT_MOVEMENT_GENERATION_PROMPT)
-            movement_result = await send_llm_request(
-                construct_prompt(movement_prompt, agent, [])
-            )
-            if "movement" in movement_result:
-                movement = movement_result["movement"].strip().lower()
-                initial_position = (agent["x"], agent["y"])
-
-                # Apply movement logic
-                if movement == "x+1":
-                    agent["x"] = (agent["x"] + 1) % GRID_SIZE
-                elif movement == "x-1":
-                    agent["x"] = (agent["x"] - 1) % GRID_SIZE
-                elif movement == "y+1":
-                    agent["y"] = (agent["y"] + 1) % GRID_SIZE
-                elif movement == "y-1":
-                    agent["y"] = (agent["y"] - 1) % GRID_SIZE
-                elif movement == "stay":
-                    logger.info(f"Agent {agent['id']} stays in place at {initial_position}.")
-                    continue
+            # Filter keys to ensure only valid hashes are processed
+            valid_agent_keys = []
+            for key in agent_keys:
+                key_type = await redis.type(key)
+                if key_type == "hash":
+                    valid_agent_keys.append(key)
                 else:
-                    logger.warning(f"Invalid movement command for Agent {agent['id']}: {movement}")
-                    continue
+                    logger.warning(f"Skipping invalid key {key} of type {key_type}")
+                    add_log(f"Skipping invalid key {key} of type {key_type}")
 
-                # Log and update position
-                logger.info(f"Agent {agent['id']} moved from {initial_position} to ({agent['x']}, {agent['y']}) with action '{movement}'.")
-                await redis.hset(f"agent:{agent['id']}", mapping={"x": agent["x"], "y": agent["y"]})
-            await asyncio.sleep(REQUEST_DELAY)
+            # Fetch agent data from Redis for all valid keys
+            agents = [
+                {
+                    "id": int(agent_data["id"]),
+                    "name": agent_data["name"],
+                    "x": int(agent_data["x"]),
+                    "y": int(agent_data["y"]),
+                    "memory": agent_data.get("memory", "")
+                }
+                for agent_data in await asyncio.gather(*[redis.hgetall(key) for key in valid_agent_keys])
+                if agent_data  # Ensure we only include valid agent data
+            ]
 
-    logger.info(f"Completed {request.steps} step(s).")
-    return JSONResponse({"status": f"Performed {request.steps} step(s)."})
+            logger.info(f"Processing {len(agents)} agents.")
+            add_log(f"Processing {len(agents)} agents for step {step + 1}.")
 
-@app.post("/stop")
+            # Process incoming messages for each agent
+            for agent in agents:
+                try:
+                    # Fetch the existing message field
+                    message = await redis.hget(f"agent:{agent['id']}", "message")
+
+                    if message:
+                        logger.info(f"Agent {agent['id']} received message: {message}")
+                        add_log(f"Agent {agent['id']} received message: {message}")
+
+                        # Optionally update memory or trigger actions based on the message
+                        updated_memory = f"{agent['memory']} | Received: {message}"
+                        await redis.hset(f"agent:{agent['id']}", "memory", updated_memory)
+
+                        # Clear the message field after processing (if required)
+                        await redis.hset(f"agent:{agent['id']}", "message", "")
+                except Exception as e:
+                    logger.error(f"Error processing message for Agent {agent['id']}: {str(e)}")
+                    add_log(f"Error processing message for Agent {agent['id']}: {str(e)}")
+
+            # Clear message queues only after processing all agents
+            for agent in agents:
+                await redis.delete(f"agent:{agent['id']}:messages")
+
+            # Message Generation
+            for agent in agents:
+                try:
+                    messages = await fetch_nearby_messages(agent, agents)
+                    message_prompt = prompts.get("message_generation_prompt", DEFAULT_MESSAGE_GENERATION_PROMPT)
+                    message_result = await send_llm_request(
+                        construct_prompt(message_prompt, agent, messages)
+                    )
+                    if "message" in message_result:
+                        await redis.hset(f"agent:{agent['id']}", "message", message_result["message"])
+                        add_log(f"Message generated for Agent {agent['id']}: {message_result['message']}")
+                except Exception as e:
+                    logger.error(f"Error generating message for Agent {agent['id']}: {str(e)}")
+                    add_log(f"Error generating message for Agent {agent['id']}: {str(e)}")
+                await asyncio.sleep(REQUEST_DELAY)
+
+            if stop_signal:
+                logger.info("Stopping after message generation due to stop signal.")
+                add_log("Simulation steps halted after message generation by stop signal.")
+                break
+
+            # Memory Generation
+            for agent in agents:
+                try:
+                    messages = await fetch_nearby_messages(agent, agents)
+                    memory_prompt = prompts.get("memory_generation_prompt", DEFAULT_MEMORY_GENERATION_PROMPT)
+                    memory_result = await send_llm_request(
+                        construct_prompt(memory_prompt, agent, messages)
+                    )
+                    if "memory" in memory_result:
+                        await redis.hset(f"agent:{agent['id']}", "memory", memory_result["memory"])
+                        add_log(f"Memory updated for Agent {agent['id']}: {memory_result['memory']}")
+                except Exception as e:
+                    logger.error(f"Error generating memory for Agent {agent['id']}: {str(e)}")
+                    add_log(f"Error generating memory for Agent {agent['id']}: {str(e)}")
+                await asyncio.sleep(REQUEST_DELAY)
+
+            if stop_signal:
+                logger.info("Stopping after memory generation due to stop signal.")
+                add_log("Simulation steps halted after memory generation by stop signal.")
+                break
+
+            # Movement Generation
+            for agent in agents:
+                try:
+                    movement_prompt = prompts.get("movement_generation_prompt", DEFAULT_MOVEMENT_GENERATION_PROMPT)
+                    movement_result = await send_llm_request(
+                        construct_prompt(movement_prompt, agent, [])
+                    )
+                    if "movement" in movement_result:
+                        movement = movement_result["movement"].strip().lower()
+                        initial_position = (agent["x"], agent["y"])
+
+                        # Apply movement logic
+                        if movement == "x+1":
+                            agent["x"] = (agent["x"] + 1) % GRID_SIZE
+                        elif movement == "x-1":
+                            agent["x"] = (agent["x"] - 1) % GRID_SIZE
+                        elif movement == "y+1":
+                            agent["y"] = (agent["y"] + 1) % GRID_SIZE
+                        elif movement == "y-1":
+                            agent["y"] = (agent["y"] - 1) % GRID_SIZE
+                        elif movement == "stay":
+                            logger.info(f"Agent {agent['id']} stays in place at {initial_position}.")
+                            add_log(f"Agent {agent['id']} stays in place at {initial_position}.")
+                            continue
+                        else:
+                            logger.warning(f"Invalid movement command for Agent {agent['id']}: {movement}")
+                            add_log(f"Invalid movement command for Agent {agent['id']}: {movement}")
+                            continue
+
+                        # Log and update position
+                        logger.info(f"Agent {agent['id']} moved from {initial_position} to ({agent['x']}, {agent['y']}) with action '{movement}'.")
+                        add_log(f"Agent {agent['id']} moved from {initial_position} to ({agent['x']}, {agent['y']}) with action '{movement}'.")
+                        await redis.hset(f"agent:{agent['id']}", mapping={"x": agent["x"], "y": agent["y"]})
+                except Exception as e:
+                    logger.error(f"Error generating movement for Agent {agent['id']}: {str(e)}")
+                    add_log(f"Error generating movement for Agent {agent['id']}: {str(e)}")
+                await asyncio.sleep(REQUEST_DELAY)
+
+        logger.info(f"Completed {request.steps} step(s).")
+        add_log(f"Simulation steps completed: {request.steps} step(s).")
+        return JSONResponse({"status": f"Performed {request.steps} step(s)."})
+    except Exception as e:
+        logger.error(f"Unexpected error during simulation steps: {str(e)}")
+        add_log(f"Unexpected error during simulation steps: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"An error occurred during simulation steps: {str(e)}")
+
+@app.post("/stop", tags=["World Simulation"])
 async def stop_simulation():
     global stop_signal
-    stop_signal = True
-    logger.info("Stop signal triggered.")
-    return JSONResponse({"status": "Simulation stopping."})
+    try:
+        # Log the start of the stop process
+        add_log("Stop simulation process initiated.")
+        
+        # Set the stop signal
+        stop_signal = True
+        add_log("Stop signal triggered successfully.")
+        
+        # Log successful completion
+        add_log("Simulation stopping process completed.")
+        return JSONResponse({"status": "Simulation stopping."})
+    except Exception as e:
+        # Log and raise any unexpected errors
+        error_message = f"Error during simulation stop process: {str(e)}"
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
 
-@app.post("/agents", response_model=Agent)
+
+@app.post("/agents", response_model=Agent, tags=["Agents"])
 async def create_agent(agent: Agent):
     agent_key = f"agent:{agent.id}"
 
-    # Check if the ID already exists in Redis
-    if await redis.exists(agent_key):
-        raise HTTPException(status_code=400, detail=f"Agent ID {agent.id} already exists in Redis.")
+    try:
+        # Log the attempt to create a new agent
+        add_log(f"Attempting to create new agent with ID {agent.id} and name '{agent.name}'.")
 
-    # Check if the ID already exists in Supabase
-    existing_agent = supabase.table("agents").select("id").eq("id", agent.id).execute()
-    if existing_agent.data:
-        raise HTTPException(status_code=400, detail=f"Agent ID {agent.id} already exists in Supabase.")
+        # Check if the ID already exists in Redis
+        if await redis.exists(agent_key):
+            error_message = f"Agent ID {agent.id} already exists in Redis."
+            add_log(error_message)
+            raise HTTPException(status_code=400, detail=error_message)
 
-    # Save agent data in Redis
-    await redis.hset(agent_key, mapping=agent.dict())
+        # Check if the ID already exists in Supabase
+        existing_agent = supabase.table("agents").select("id").eq("id", agent.id).execute()
+        if existing_agent.data:
+            error_message = f"Agent ID {agent.id} already exists in Supabase."
+            add_log(error_message)
+            raise HTTPException(status_code=400, detail=error_message)
 
-    # Add the agent key to the Redis list
-    await redis.lpush("agent_keys", agent_key)
+        # Save agent data in Redis
+        await redis.hset(agent_key, mapping=agent.dict())
+        add_log(f"Agent data for ID {agent.id} saved in Redis.")
 
-    # Save the agent in Supabase
-    supabase.table("agents").insert(agent.dict()).execute()
+        # Add the agent key to the Redis list
+        await redis.lpush("agent_keys", agent_key)
+        add_log(f"Agent key for ID {agent.id} added to Redis agent_keys list.")
 
-    return agent
+        # Save the agent in Supabase
+        supabase.table("agents").insert(agent.dict()).execute()
+        add_log(f"Agent data for ID {agent.id} saved in Supabase.")
 
-@app.get("/agents/{agent_id}", response_model=Agent)
+        # Log the successful creation of the agent
+        add_log(f"New agent created successfully: ID={agent.id}, Name={agent.name}, Position=({agent.x}, {agent.y})")
+        
+        return agent
+
+    except Exception as e:
+        # Log and raise unexpected errors
+        error_message = f"Error creating agent with ID {agent.id}: {str(e)}"
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
+
+
+@app.get("/agents/{agent_id}", response_model=Agent, tags=["Agents"])
 async def get_agent(agent_id: int):
+    # Log the attempt to fetch agent data
+    add_log(f"Fetching data for agent with ID {agent_id}.")
+
     # Fetch agent data from Redis
     agent_data = await redis.hgetall(f"agent:{agent_id}")
     if not agent_data:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    
+        error_message = f"Agent with ID {agent_id} not found."
+        add_log(error_message)
+        raise HTTPException(status_code=404, detail=error_message)
+
     # Convert Redis data into an Agent model (ensure proper types are cast)
-    agent = Agent(
-        id=agent_id,
-        name=agent_data.get("name"),
-        x=int(agent_data.get("x")),
-        y=int(agent_data.get("y")),
-        memory=agent_data.get("memory", "")
-    )
-    return agent
+    try:
+        agent = Agent(
+            id=agent_id,
+            name=agent_data.get("name"),
+            x=int(agent_data.get("x")),
+            y=int(agent_data.get("y")),
+            memory=agent_data.get("memory", "")
+        )
+        add_log(f"Successfully fetched agent with ID {agent_id}, Name: {agent.name}, Position: ({agent.x}, {agent.y}).")
+        return agent
+    except Exception as e:
+        error_message = f"Failed to parse data for agent ID {agent_id}: {str(e)}"
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
 
-@app.put("/agents/{agent_id}", response_model=Agent)
+@app.put("/agents/{agent_id}", response_model=Agent, tags=["Agents"])
 async def update_agent(agent_id: int, agent: Agent):
-    # Update agent data in Redis (assuming 'hset' is used to update fields)
-    await redis.hset(f"agent:{agent_id}", mapping=agent.dict())
-    
-    # Optionally, update agent in Supabase for persistent storage
-    supabase.table("agents").update(agent.dict()).eq("id", agent_id).execute()
-    
-    return agent
+    try:
+        # Log the attempt to update agent data
+        add_log(f"Attempting to update agent with ID {agent_id}.")
 
-@app.post("/agents/{agent_id}/send_memory")
-async def send_memory(agent_id: int, recipient_id: int, message: str):
-    sender_key = f"agent:{agent_id}"
-    recipient_key = f"agent:{recipient_id}"
+        # Update agent data in Redis
+        await redis.hset(f"agent:{agent_id}", mapping=agent.dict())
+        add_log(f"Agent with ID {agent_id} updated in Redis.")
 
-    # Validate that the sender and recipient exist
-    if not await redis.exists(sender_key):
-        raise HTTPException(status_code=404, detail=f"Sender Agent ID {agent_id} not found.")
-    if not await redis.exists(recipient_key):
-        raise HTTPException(status_code=404, detail=f"Recipient Agent ID {recipient_id} not found.")
+        # Update agent in Supabase
+        supabase.table("agents").update(agent.dict()).eq("id", agent_id).execute()
+        add_log(f"Agent with ID {agent_id} updated in Supabase.")
 
-    # Fetch the recipient's existing memory field
-    existing_memory = await redis.hget(recipient_key, "memory")
-    if existing_memory:
-        # Append the new message to the recipient's memory
-        updated_memory = f"{existing_memory}\nFrom Agent {agent_id}: {message}"
-    else:
-        # Start the memory with the new message
-        updated_memory = f"From Agent {agent_id}: {message}"
+        # Log successful update
+        add_log(f"Successfully updated agent with ID {agent_id}.")
+        return agent
+    except Exception as e:
+        # Log and raise error if update fails
+        error_message = f"Error updating agent with ID {agent_id}: {str(e)}"
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
 
-    # Update the recipient's memory field
-    await redis.hset(recipient_key, "memory", updated_memory)
-
-    logger.info(f'Message appended to Agent {recipient_id}\'s memory from Agent {agent_id}: "{message}"')
-    return {"status": "Memory updated successfully", "message": message}
-
-@app.delete("/agents/{agent_id}")
+@app.delete("/agents/{agent_id}", tags=["Agents"])
 async def delete_agent(agent_id: int):
     agent_key = f"agent:{agent_id}"
+    try:
+        # Log the attempt to delete an agent
+        add_log(f"Attempting to delete agent with ID {agent_id}.")
 
-    # Delete agent from Redis
-    await redis.delete(agent_key)
+        # Delete agent from Redis
+        await redis.delete(agent_key)
+        add_log(f"Agent with ID {agent_id} deleted from Redis.")
 
-    # Remove the key from the Redis list
-    await redis.lrem("agent_keys", 0, agent_key)
+        # Remove the key from the Redis list
+        await redis.lrem("agent_keys", 0, agent_key)
+        add_log(f"Agent key with ID {agent_id} removed from Redis agent_keys list.")
 
-    # Optionally, delete the agent from Supabase
-    supabase.table("agents").delete().eq("id", agent_id).execute()
+        # Optionally, delete the agent from Supabase
+        supabase.table("agents").delete().eq("id", agent_id).execute()
+        add_log(f"Agent with ID {agent_id} deleted from Supabase.")
 
-    return {"status": "Agent deleted successfully"}
+        return {"status": "Agent deleted successfully"}
+    except Exception as e:
+        # Log and raise any unexpected errors
+        error_message = f"Error deleting agent with ID {agent_id}: {str(e)}"
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
 
-@app.get("/agents/{agent_id}/nearby", response_model=List[Agent])
+from fastapi import Query
+
+@app.post("/agents/{recipient_id}/create_memory", tags=["Utilities"])
+async def create_memory(
+    recipient_id: int,
+    message: str = Query(..., description="The memory content to add or update for the recipient agent.")
+):
+    recipient_key = f"agent:{recipient_id}"
+
+    try:
+        # Log the attempt to create memory
+        add_log(f"Creating a memory for Agent {recipient_id}: \"{message}\".")
+
+        # Validate that the recipient exists
+        if not await redis.exists(recipient_key):
+            error_message = f"Recipient Agent ID {recipient_id} not found."
+            add_log(error_message)
+            raise HTTPException(status_code=404, detail=error_message)
+
+        # Fetch the recipient's existing memory field
+        existing_memory = await redis.hget(recipient_key, "memory")
+        if existing_memory:
+            # Append the new message to the recipient's memory
+            updated_memory = f"{existing_memory}\n{message}"
+        else:
+            # Start the memory with the new message
+            updated_memory = message
+
+        # Update the recipient's memory field
+        await redis.hset(recipient_key, "memory", updated_memory)
+        add_log(f"Memory updated successfully for Agent {recipient_id}: \"{message}\".")
+
+        return {"status": "Memory updated successfully", "message": message}
+
+    except Exception as e:
+        # Log and raise any unexpected errors
+        error_message = f"Error creating memory for Agent {recipient_id}: {str(e)}"
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
+
+@app.get("/agents/{agent_id}/nearby", response_model=List[Agent], tags=["Utilities"])
 async def get_nearby_agents(agent_id: int):
-    # Get the agent's position from Redis
-    agent_data = await redis.hgetall(f"agent:{agent_id}")
-    if not agent_data:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    
-    agent = Agent(**agent_data)
-    
-    # Fetch all agents except the current one
-    all_agents = [
-        Agent(**await redis.hgetall(f"agent:{i}"))
-        for i in range(NUM_AGENTS) if i != agent_id
-    ]
-    
-    # Filter nearby agents based on Chebyshev distance
-    nearby_agents = [
-        a for a in all_agents
-        if chebyshev_distance(agent.x, agent.y, a.x, a.y) <= CHEBYSHEV_DISTANCE
-    ]
-    
-    return nearby_agents
+    try:
+        # Log the attempt to fetch nearby agents
+        add_log(f"Fetching nearby agents for Agent ID {agent_id}.")
 
-@app.post("/sync_agents")
+        # Get the agent's position from Redis
+        agent_data = await redis.hgetall(f"agent:{agent_id}")
+        if not agent_data:
+            error_message = f"Agent with ID {agent_id} not found."
+            add_log(error_message)
+            raise HTTPException(status_code=404, detail=error_message)
+
+        agent = Agent(**agent_data)
+
+        # Fetch all agents except the current one
+        all_agents = [
+            Agent(**await redis.hgetall(f"agent:{i}"))
+            for i in range(NUM_AGENTS) if i != agent_id
+        ]
+
+        # Filter nearby agents based on Chebyshev distance
+        nearby_agents = [
+            a for a in all_agents
+            if chebyshev_distance(agent.x, agent.y, a.x, a.y) <= CHEBYSHEV_DISTANCE
+        ]
+
+        add_log(f"Nearby agents fetched successfully for Agent ID {agent_id}. Total nearby agents: {len(nearby_agents)}.")
+        return nearby_agents
+    except Exception as e:
+        # Log and raise any unexpected errors
+        error_message = f"Error fetching nearby agents for Agent ID {agent_id}: {str(e)}"
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
+
+@app.post("/sync_agents", tags=["Utilities"])
 async def sync_agents():
-    all_agents = [
-        Agent(**await redis.hgetall(f"agent:{i}"))
-        for i in range(NUM_AGENTS)
-    ]
-    
-    for agent in all_agents:
-        supabase.table("agents").upsert(agent.dict()).execute()
-    
-    return {"status": "Agents synchronized between Redis and Supabase"}
+    try:
+        # Log the start of the synchronization process
+        add_log("Synchronization process initiated between Redis and Supabase.")
 
-@app.get("/settings", response_model=SimulationSettings)
+        all_agents = [
+            Agent(**await redis.hgetall(f"agent:{i}"))
+            for i in range(NUM_AGENTS)
+        ]
+
+        for agent in all_agents:
+            supabase.table("agents").upsert(agent.dict()).execute()
+            add_log(f"Agent with ID {agent.id} synchronized to Supabase.")
+
+        add_log("Synchronization process completed successfully.")
+        return {"status": "Agents synchronized between Redis and Supabase"}
+    except Exception as e:
+        # Log and raise any unexpected errors
+        error_message = f"Error during agent synchronization: {str(e)}"
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
+
+@app.get("/settings", response_model=SimulationSettings, tags=["Settings"])
 async def get_settings():
-    # Fetch all agent keys from Redis
-    agent_keys = await redis.keys("agent:*")  # Get all keys matching agent pattern
-    num_agents = len(agent_keys)  # Count the number of agents
+    try:
+        # Log the attempt to fetch simulation settings
+        add_log("Fetching simulation settings.")
 
-    # Alternatively, you can count agents from Supabase
-    # num_agents = len(supabase.table("agents").select("id").execute().data)
+        # Fetch all agent keys from Redis
+        agent_keys = await redis.keys("agent:*")  # Get all keys matching agent pattern
+        num_agents = len(agent_keys)  # Count the number of agents
 
-    # Return the dynamically updated number of agents
-    return SimulationSettings(
-        grid_size=GRID_SIZE,
-        num_agents=num_agents,
-        max_steps=MAX_STEPS,
-        chebyshev_distance=CHEBYSHEV_DISTANCE,
-        llm_model=LLM_MODEL,
-        llm_max_tokens=LLM_MAX_TOKENS,
-        llm_temperature=LLM_TEMPERATURE,
-        request_delay=REQUEST_DELAY,
-        max_concurrent_requests=MAX_CONCURRENT_REQUESTS
-    )
+        # Log successful retrieval
+        add_log(f"Simulation settings fetched successfully. Total agents: {num_agents}.")
+        
+        # Return the dynamically updated number of agents
+        return SimulationSettings(
+            grid_size=GRID_SIZE,
+            num_agents=num_agents,
+            max_steps=MAX_STEPS,
+            chebyshev_distance=CHEBYSHEV_DISTANCE,
+            llm_model=LLM_MODEL,
+            llm_max_tokens=LLM_MAX_TOKENS,
+            llm_temperature=LLM_TEMPERATURE,
+            request_delay=REQUEST_DELAY,
+            max_concurrent_requests=MAX_CONCURRENT_REQUESTS
+        )
+    except Exception as e:
+        # Log and raise any unexpected errors
+        error_message = f"Error fetching simulation settings: {str(e)}"
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
 
-@app.post("/settings", response_model=SimulationSettings)
+@app.post("/settings", response_model=SimulationSettings, tags=["Settings"])
 async def set_settings(settings: SimulationSettings):
-    global GRID_SIZE, NUM_AGENTS, MAX_STEPS, CHEBYSHEV_DISTANCE, LLM_MODEL
-    global LLM_MAX_TOKENS, LLM_TEMPERATURE, REQUEST_DELAY, MAX_CONCURRENT_REQUESTS
+    try:
+        # Log the attempt to update simulation settings
+        add_log("Updating simulation settings.")
 
-    GRID_SIZE = settings.grid_size
-    NUM_AGENTS = settings.num_agents
-    MAX_STEPS = settings.max_steps
-    CHEBYSHEV_DISTANCE = settings.chebyshev_distance
-    LLM_MODEL = settings.llm_model
-    LLM_MAX_TOKENS = settings.llm_max_tokens
-    LLM_TEMPERATURE = settings.llm_temperature
-    REQUEST_DELAY = settings.request_delay
-    MAX_CONCURRENT_REQUESTS = settings.max_concurrent_requests
+        global GRID_SIZE, NUM_AGENTS, MAX_STEPS, CHEBYSHEV_DISTANCE, LLM_MODEL
+        global LLM_MAX_TOKENS, LLM_TEMPERATURE, REQUEST_DELAY, MAX_CONCURRENT_REQUESTS
 
-    return settings
+        GRID_SIZE = settings.grid_size
+        NUM_AGENTS = settings.num_agents
+        MAX_STEPS = settings.max_steps
+        CHEBYSHEV_DISTANCE = settings.chebyshev_distance
+        LLM_MODEL = settings.llm_model
+        LLM_MAX_TOKENS = settings.llm_max_tokens
+        LLM_TEMPERATURE = settings.llm_temperature
+        REQUEST_DELAY = settings.request_delay
+        MAX_CONCURRENT_REQUESTS = settings.max_concurrent_requests
+
+        # Log successful update
+        add_log("Simulation settings updated successfully.")
+        return settings
+    except Exception as e:
+        # Log and raise any unexpected errors
+        error_message = f"Error updating simulation settings: {str(e)}"
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
 
 # Endpoint to get current prompt templates
-@app.get("/prompts", response_model=PromptSettings)
+@app.get("/prompts", response_model=PromptSettings, tags=["Settings"])
 async def get_prompts():
-    return PromptSettings(
-        message_generation_prompt=DEFAULT_MESSAGE_GENERATION_PROMPT,
-        memory_generation_prompt=DEFAULT_MEMORY_GENERATION_PROMPT,
-        movement_generation_prompt=DEFAULT_MOVEMENT_GENERATION_PROMPT
-    )
+    try:
+        # Log the attempt to fetch prompt templates
+        add_log("Fetching current prompt templates.")
+
+        # Return the prompt templates
+        prompts = PromptSettings(
+            message_generation_prompt=DEFAULT_MESSAGE_GENERATION_PROMPT,
+            memory_generation_prompt=DEFAULT_MEMORY_GENERATION_PROMPT,
+            movement_generation_prompt=DEFAULT_MOVEMENT_GENERATION_PROMPT
+        )
+
+        # Log successful retrieval
+        add_log("Prompt templates fetched successfully.")
+        return prompts
+    except Exception as e:
+        # Log and raise any unexpected errors
+        error_message = f"Error fetching prompt templates: {str(e)}"
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
 
 # Endpoint to set new prompt templates
-@app.post("/prompts", response_model=PromptSettings)
+@app.post("/prompts", response_model=PromptSettings, tags=["Settings"])
 async def set_prompts(prompts: PromptSettings):
-    global DEFAULT_MESSAGE_GENERATION_PROMPT, DEFAULT_MEMORY_GENERATION_PROMPT, DEFAULT_MOVEMENT_GENERATION_PROMPT
+    try:
+        # Log the attempt to update prompt templates
+        add_log("Updating prompt templates.")
 
-    DEFAULT_MESSAGE_GENERATION_PROMPT = prompts.message_generation_prompt
-    DEFAULT_MEMORY_GENERATION_PROMPT = prompts.memory_generation_prompt
-    DEFAULT_MOVEMENT_GENERATION_PROMPT = prompts.movement_generation_prompt
+        global DEFAULT_MESSAGE_GENERATION_PROMPT, DEFAULT_MEMORY_GENERATION_PROMPT, DEFAULT_MOVEMENT_GENERATION_PROMPT
 
-    return prompts
+        DEFAULT_MESSAGE_GENERATION_PROMPT = prompts.message_generation_prompt
+        DEFAULT_MEMORY_GENERATION_PROMPT = prompts.memory_generation_prompt
+        DEFAULT_MOVEMENT_GENERATION_PROMPT = prompts.movement_generation_prompt
+
+        # Log successful update
+        add_log("Prompt templates updated successfully.")
+        return prompts
+    except Exception as e:
+        # Log and raise any unexpected errors
+        error_message = f"Error updating prompt templates: {str(e)}"
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
+
+# WebSocket Endpoint for Real-Time Logs
+@app.websocket("/logs")
+async def websocket_log_endpoint(websocket: WebSocket):
+    add_log("WebSocket connection initiated for real-time logs.")
+    await websocket.accept()
+    try:
+        while True:
+            if LOG_QUEUE:
+                # Send all current logs to the client
+                for log in list(LOG_QUEUE):
+                    await websocket.send_text(log)
+                LOG_QUEUE.clear()  # Clear the queue after sending
+            await asyncio.sleep(1)  # Check for new logs every second
+    except asyncio.CancelledError:
+        # Log graceful cancellation
+        add_log("WebSocket log stream cancelled by the client.")
+    except Exception as e:
+        # Log unexpected exceptions
+        error_message = f"Error in WebSocket log stream: {str(e)}"
+        logger.error(error_message)
+        add_log(error_message)
+    finally:
+        # Log connection close and clean up
+        add_log("WebSocket connection for real-time logs closed.")
+        await websocket.close()
 
 if __name__ == "__main__":
     import uvicorn
