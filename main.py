@@ -102,7 +102,7 @@ def chebyshev_distance(x1, y1, x2, y2):
     return max(abs(x1 - x2), abs(y1 - y2))
 
 # Prompt Templates
-GRID_DESCRIPTION = "The field size is 30 x 30 with periodic boundary conditions, and there are a total of 10 beings. You are free to move around the field and converse with other beings."
+GRID_DESCRIPTION = "You are in a field with periodic boundary conditions with other beings. You are free to move around the field and converse with other beings."
 
 DEFAULT_MESSAGE_GENERATION_PROMPT = """
 [INST]
@@ -581,14 +581,18 @@ async def get_nearby_agents(agent_id: int):
     agent_data = await redis.hgetall(f"agent:{agent_id}")
     if not agent_data:
         raise HTTPException(status_code=404, detail="Agent not found")
-    
+
     agent = Agent(**agent_data)
     
     # Fetch all agents except the current one
-    all_agents = [
-        Agent(**await redis.hgetall(f"agent:{i}"))
-        for i in range(NUM_AGENTS) if i != agent_id
-    ]
+    all_agents = []
+    for i in range(NUM_AGENTS):
+        if i != agent_id:
+            agent_info = await redis.hgetall(f"agent:{i}")
+            if agent_info and all(key in agent_info for key in ["id", "name", "x", "y"]):
+                all_agents.append(Agent(**agent_info))
+            else:
+                logger.warning(f"Missing or incomplete data for agent {i}. Skipping.")
     
     # Filter nearby agents based on Chebyshev distance
     nearby_agents = [
@@ -600,10 +604,13 @@ async def get_nearby_agents(agent_id: int):
 
 @app.post("/sync_agents")
 async def sync_agents():
-    all_agents = [
-        Agent(**await redis.hgetall(f"agent:{i}"))
-        for i in range(NUM_AGENTS)
-    ]
+    all_agents = []
+    for i in range(NUM_AGENTS):
+        agent_data = await redis.hgetall(f"agent:{i}")
+        if agent_data and all(key in agent_data for key in ["id", "name", "x", "y"]):
+            all_agents.append(Agent(**agent_data))
+        else:
+            logger.warning(f"Missing or incomplete data for agent {i}. Skipping.")
     
     for agent in all_agents:
         supabase.table("entities").upsert(agent.dict()).execute()
