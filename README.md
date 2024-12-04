@@ -6,15 +6,18 @@ This project implements an enhanced version of the **Takata et al. experiment** 
 
 The application is built using **Python** with **FastAPI**, uses **Supabase** as the database, and **Redis** for caching. It also includes a WebSocket client for interactive logging.
 
+Explore the spontaneous emergence of individuality, social norms, and collective intelligence in multi-agent systems powered by Large Language Models (LLMs). This project replicates and extends the groundbreaking work from the paper "Spontaneous Emergence of Agent Individuality Through Social Interactions in LLM-Based Communities" by Ryosuke Takata et al.
+
+With agents starting from a uniform state, this simulation demonstrates how personalities, emotions, and behaviors evolve organically through cooperative communication. Using Supabase and Redis, the application implements a grid-based environment where agents interact via natural language, generating insights into emergent phenomena such as hashtags, hallucinations, and shared narratives.
+
 ---
 
 ## 🌟 Features
 
-- **Agent simulation** in a 30x30 grid.
-- Memory and message exchange between agents.
-- Easy-to-deploy setup on **Vercel**.
-- Uses **Supabase** for persistence and **Redis** for caching.
-- View real-time logs using Redis's `MONITOR` feature.
+- **No predefined individuality:** Agents begin as homogeneous entities, with unique traits emerging through interaction.
+- **Emergent phenomena:** Witness the rise of shared norms, emotional synchronicity, and creative hallucinations in a simulated community.
+- **Scalable architecture:** Built on Python's FastAPI, with Supabase for persistence and Redis for caching, ensuring efficient simulation management.
+- **Research-focused:** A platform for studying the dynamics of collective intelligence and individuality in LLM-based agent communities.
 
 ---
 
@@ -33,8 +36,10 @@ Follow these steps to set up the application locally:
 ### 1️⃣ Prerequisites
 
 - Python 3.9+
-- Redis
-- Supabase account (with keys)
+- free Vercel account
+- free Upstash Redis account
+- free Supabase account
+- free Groq Cloud account
 - Node.js (optional, for WebSocket client)
 
 ---
@@ -53,7 +58,7 @@ cd takata-simulation
 ```bash
 python -m venv takata-simulation
 source takata-simulation/bin/activate  # For Linux/Mac
-venv\Scripts\activate     # For Windows
+takata-simulation\Scripts\activate     # For Windows
 ```
 
 ---
@@ -76,7 +81,7 @@ SUPABASE_KEY=your_supabase_key
 GROQ_API_KEY=your_groq_api_key
 GROQ_API_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 REDIS_ENDPOINT=your_redis_endpoint_without_https (dont insert the https:// part, ie "cute-crawdaddy-23143.upstash.io")
-REDIS_PASSWORD=os.getenv("REDIS_PASSWORD")
+REDIS_PASSWORD=your_redis_password
 ```
 
 ---
