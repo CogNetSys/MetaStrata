@@ -5,9 +5,6 @@ __pycache__/
 
 # Virtual environment
 MetaStrata-venv/
-
-# Environment variables
-.env
 .venv
 
 # Others

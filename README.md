@@ -51,8 +51,8 @@ cd takata-simulation
 ### 3️⃣ Set Up a Virtual Environment
 
 ```bash
-python -m venv venv
-source venv/bin/activate  # For Linux/Mac
+python -m venv takata-simulation
+source takata-simulation/bin/activate  # For Linux/Mac
 venv\Scripts\activate     # For Windows
 ```
 
@@ -74,7 +74,9 @@ Create a `.env` file in the project directory and add your configuration:
 SUPABASE_URL=your_supabase_url
 SUPABASE_KEY=your_supabase_key
 GROQ_API_KEY=your_groq_api_key
-REDIS_PASSWORD=your_redis_password
+GROQ_API_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
+REDIS_ENDPOINT=your_redis_endpoint_without_https (dont insert the https:// part, ie "cute-crawdaddy-23143.upstash.io")
+REDIS_PASSWORD=os.getenv("REDIS_PASSWORD")
 ```
 
 ---
@@ -102,7 +104,7 @@ The application will be available at `http://localhost:8000`.
 ### 8️⃣ Access Endpoints
 
 - **Swagger UI**: [http://localhost:8000/docs](http://localhost:8000/docs)
-- **Static WebSocket Client**: [http://localhost:8000/static/js/websocket_client.js](http://localhost:8000/static/js/websocket_client.js)
+- **Vercel Swagger UI**: http://<your-app>.vercel.app/docs
 
 ---
 
@@ -122,7 +124,11 @@ The application will be available at `http://localhost:8000`.
    ```bash
    vercel deploy
    ```
-
+3. After you deploy, click the link to your deployment.
+4. Append "/docs" to the URL and click "enter."
+5. Use the FastAPI/Swagger UI to control the experiment.
+6. You can view the websocket stream at the bottom of the page.
+    - If the websocket stream ends, refresh the page to restart it.
 ---
 
 ## 🔑 Key Commands
