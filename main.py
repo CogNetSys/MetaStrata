@@ -2,8 +2,10 @@ import os
 import random
 import asyncio
 from typing import List, Dict
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.openapi.docs import get_swagger_ui_html
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from redis.asyncio import Redis
@@ -231,7 +233,7 @@ async def send_llm_request(prompt, max_retries=3, base_delay=2):
 async def initialize_agents():
     logger.info("Resetting simulation state.")
     supabase.table("movements").delete().neq("agent_id", -1).execute()
-    supabase.table("agents").delete().neq("id", -1).execute()
+    supabase.table("entities").delete().neq("id", -1).execute()
 
     agents = [
         {
@@ -243,7 +245,7 @@ async def initialize_agents():
         }
         for i in range(NUM_AGENTS)
     ]
-    supabase.table("agents").insert(agents).execute()
+    supabase.table("entities").insert(agents).execute()
     for agent in agents:
         await redis.hset(f"agent:{agent['id']}", mapping=agent)
     logger.info("Agents initialized.")
@@ -274,7 +276,113 @@ async def lifespan(app: FastAPI):
         logger.info("Redis connection closed.")
 
 # Create FastAPI app with lifespan
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(
+    title="Takata et al enhanced implementation", 
+    version="0.0.3", 
+    description="This is the enhanced implementation of the <a href='https://arxiv.org/pdf/2411.03252' target='_blank'>Takata et al experiment.</a>",
+    lifespan=lifespan
+)
+
+# Serve static files
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/docs", tags=["Simulation"], include_in_schema=False)
+async def custom_swagger_ui_html():
+    logger.info("Custom /docs endpoint is being served")  # Logs when /docs is accessed
+    html = get_swagger_ui_html(
+        openapi_url=app.openapi_url,
+        title="FastAPI - WebSocket Integration",
+    )
+
+    custom_script = '<script src="/static/js/websocket_client.js"></script>'
+    log_area = '''
+        <div class="opblock opblock-get" id="websocket-logs-section" style="margin-top: 20px; max-width: 1400px; margin: auto;">
+            <div class="opblock-summary opblock-summary-get">
+                <button
+                    aria-expanded="true"
+                    class="opblock-summary-control"
+                    style="display: flex; align-items: center; justify-content: space-between; width: 100%; border: none; background: none; padding: 10px 15px; cursor: pointer; font-weight: bold; font-size: 14px;"
+                    onclick="toggleLogSection()"
+                >
+                    <span>MetaStrata Logs</span>
+                    <span style="font-size: 18px;">&#x25B2;</span>
+                </button>
+            </div>
+            <div id="websocket-logs-container" class="opblock-body" style="display: block; padding: 10px; background-color: #f6f6f6; border: 1px solid #e8e8e8; border-radius: 4px;">
+                <div id="websocket-controls" style="text-align: center; margin-bottom: 10px;">
+                    <button id="clear-logs" style="margin-right: 10px; padding: 5px 10px; border-radius: 5px; background-color: #f44336; color: white; border: none; cursor: pointer;">
+                        Clear Logs
+                    </button>
+                    <button id="select-all" style="padding: 5px 10px; border-radius: 5px; background-color: #4caf50; color: white; border: none; cursor: pointer;">
+                        Select All
+                    </button>
+                </div>
+                <div id="websocket-logs" style="background: #f9f9f9; padding: 10px; height: 700px; overflow-y: auto; border: 1px solid #ccc; border-radius: 5px">
+                    <p>WebSocket logs will appear here...</p>
+                </div>
+            </div>
+        </div>
+    '''
+    custom_script += '''
+        <script>
+            function toggleLogSection() {
+                const container = document.getElementById('websocket-logs-container');
+                const button = container.previousElementSibling.querySelector('span:nth-child(2)');
+                if (container.style.display === 'none') {
+                    container.style.display = 'block';
+                    button.innerHTML = '&#x25B2;';
+                } else {
+                    container.style.display = 'none';
+                    button.innerHTML = '&#x25BC;';
+                }
+            }
+
+            // Automatically collapse the schemas section and open WebSocket logs on page load
+            document.addEventListener("DOMContentLoaded", function() {
+                // Collapse the schemas section
+                const schemasSummary = document.querySelector("section.models.is-open .models-summary");
+                if (schemasSummary) {
+                    schemasSummary.click(); // Simulates a click to collapse it
+                }
+
+                // Open the WebSocket logs section
+                const logsContainer = document.getElementById("websocket-logs-container");
+                const logsButton = logsContainer.previousElementSibling.querySelector('span:nth-child(2)');
+                if (logsContainer && logsButton) {
+                    logsContainer.style.display = 'block';
+                    logsButton.innerHTML = '&#x25B2;'; // Ensure the arrow points up
+                }
+
+                // Add event listener for the clear logs button
+                const clearLogsButton = document.getElementById("clear-logs");
+                const logsDiv = document.getElementById("websocket-logs");
+
+                if (clearLogsButton) {
+                    clearLogsButton.addEventListener("click", function() {
+                        if (logsDiv) {
+                            logsDiv.innerHTML = ""; // Clear the logs
+                            logsDiv.innerHTML = "<p>WebSocket logs will appear here...</p>"; // Reset placeholder
+                        }
+                    });
+                }
+
+                // Add event listener for the select all button
+                const selectAllButton = document.getElementById("select-all");
+                if (selectAllButton) {
+                    selectAllButton.addEventListener("click", function() {
+                        const range = document.createRange();
+                        range.selectNodeContents(logsDiv);
+                        const selection = window.getSelection();
+                        selection.removeAllRanges();
+                        selection.addRange(range);
+                    });
+                }
+            });
+        </script>
+    '''
+    modified_html = html.body.decode("utf-8").replace("</body>", f"{custom_script}{log_area}</body>")
+    
+    return HTMLResponse(modified_html)
 
 # Simulation API Endpoints
 @app.post("/reset")
@@ -414,7 +522,7 @@ async def create_agent(agent: Agent):
     await redis.hset(f"agent:{agent.id}", mapping=agent.dict())
     
     # Optionally, store agent in Supabase for persistent storage
-    supabase.table("agents").insert(agent.dict()).execute()
+    supabase.table("entities").insert(agent.dict()).execute()
     
     return agent
 
@@ -441,7 +549,7 @@ async def update_agent(agent_id: int, agent: Agent):
     await redis.hset(f"agent:{agent_id}", mapping=agent.dict())
     
     # Optionally, update agent in Supabase for persistent storage
-    supabase.table("agents").update(agent.dict()).eq("id", agent_id).execute()
+    supabase.table("entities").update(agent.dict()).eq("id", agent_id).execute()
     
     return agent
 
@@ -463,7 +571,7 @@ async def delete_agent(agent_id: int):
     await redis.delete(f"agent:{agent_id}")
     
     # Optionally, delete agent from Supabase
-    supabase.table("agents").delete().eq("id", agent_id).execute()
+    supabase.table("entities").delete().eq("id", agent_id).execute()
     
     return {"status": "Agent deleted successfully"}
 
@@ -498,7 +606,7 @@ async def sync_agents():
     ]
     
     for agent in all_agents:
-        supabase.table("agents").upsert(agent.dict()).execute()
+        supabase.table("entities").upsert(agent.dict()).execute()
     
     return {"status": "Agents synchronized between Redis and Supabase"}
 
