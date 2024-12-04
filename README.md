@@ -2,11 +2,14 @@
 
 # 🧠 Takata et al. Experiment Simulation
 
+#### Description of Software
+
 This project implements an enhanced version of the **Takata et al. experiment** as described in their [research paper](https://arxiv.org/pdf/2411.03252). It simulates autonomous agents moving in a grid, exchanging messages, and building memories based on their surroundings.
 
 The application is built using **Python** with **FastAPI**, uses **Supabase** as the database, and **Redis** for caching. It uses Groq Cloud for super fast LLM model inference speeds. It also includes a WebSocket client for interactive logging.
 
-### Description
+#### Description of Experiment
+
 Explore the spontaneous emergence of individuality, social norms, and collective intelligence in multi-agent systems powered by Large Language Models (LLMs). This project replicates and extends the groundbreaking work from the paper "Spontaneous Emergence of Agent Individuality Through Social Interactions in LLM-Based Communities" by Ryosuke Takata et al.
 
 With agents starting from a uniform state, this simulation demonstrates how personalities, emotions, and behaviors evolve organically through cooperative communication. Using Supabase and Redis, the application implements a grid-based environment where agents interact via natural language, generating insights into emergent phenomena such as hashtags, hallucinations, and shared narratives.
