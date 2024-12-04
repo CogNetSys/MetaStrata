@@ -17,16 +17,15 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
 GRID_SIZE = 30
 NUM_ENTITIES = 10
 MAX_STEPS = 100
-MAX_COMMUNICATION_DISTANCE = 5
+CHEBYSHEV_DISTANCE = 5
 LLM_MODEL = "llama-3.2-11b-vision-preview"
 LLM_MAX_TOKENS = 2048
 LLM_TEMPERATURE = 0.7
 REQUEST_DELAY = 2.2
 MAX_CONCURRENT_REQUESTS = 5
-CHEBYSHEV_DISTANCE = 5
 
 # Prompt Templates
-GRID_DESCRIPTION = "The simulation occurs on a 2D lattice with dimensions 30 x 30. It uses toroidal (wrap-around) boundary conditions. There are 10 entities on the grid. You can move between adjacent cells (up, down, left, right), and communicate with other entities within a Chebyshev distance of 5 cells. Work collectively to solve problems."
+GRID_DESCRIPTION = "The field size is 30 x 30 with periodic boundary conditions, and there are a total of 10 entities. You are free to move around the field and converse with other entities. Work collectively to solve problems."
 
 DEFAULT_MESSAGE_GENERATION_PROMPT = """
 [INST]
@@ -46,7 +45,7 @@ DEFAULT_MOVEMENT_GENERATION_PROMPT = """
 [INST]
 You are entity{entityId} at position ({x}, {y}). {grid_description} You have a summary memory of the situation so far: {memory}.
 Based on this, decide your next move. Respond with only one of the following options, and nothing else: "x+1", "x-1", "y+1", "y-1", or "stay".
-Consider the periodic boundary conditions when deciding your move. Do not provide any explanation or additional text.
+Do not provide any explanation or additional text.
 [/INST]
 """
 
