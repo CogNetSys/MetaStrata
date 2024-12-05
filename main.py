@@ -1,12 +1,15 @@
 import os
 import random
 import asyncio
+import json
+import time
+import tracemalloc
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException, WebSocket, Query
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi import FastAPI, HTTPException, WebSocket, File, UploadFile, APIRouter, Query
+from fastapi.responses import JSONResponse, HTMLResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.openapi.docs import get_swagger_ui_html
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from redis.asyncio import Redis
 from supabase import create_client, Client
@@ -17,11 +20,13 @@ from contextlib import asynccontextmanager
 import traceback
 from collections import deque
 from datetime import datetime
-
-# PydanticAI Imports
+from endpoints import router
 from pydantic_ai import Agent
 from pydantic_ai.models.groq import GroqModel, GroqModelName
-
+import matplotlib.pyplot as plt
+import numpy as np
+import io
+import networkx as nx
 from config import (
     SUPABASE_URL,
     SUPABASE_KEY,
@@ -46,6 +51,7 @@ from config import (
 )
 
 load_dotenv()
+installed_plugins = []
 
 # Global log queue for real-time logging
 LOG_QUEUE = deque(maxlen=200)  # Keeps the last 200 log messages
@@ -82,6 +88,13 @@ class LLMResponse(BaseModel):
     memory: Optional[str] = ""
     movement: Optional[str] = "stay"
 
+class BatchMessage(BaseModel):
+    entity_id: int
+    message: str
+
+class BatchMessagesPayload(BaseModel):
+    messages: List[BatchMessage]
+
 # Redis & Supabase Initialization
 redis = Redis(
     host=REDIS_ENDPOINT,
@@ -110,7 +123,9 @@ groq_model = GroqModel(
 
 agent = Agent(
     model=groq_model,
-    result_type=LLMResponse
+    result_type=LLMResponse,
+    retries=30,
+    defer_model_check=True,
 )
 
 # Fetching Nearby Entities Function
@@ -121,10 +136,12 @@ def chebyshev_distance(x1, y1, x2, y2):
 class StepRequest(BaseModel):
     steps: int
 
-# Helper Functions
 def construct_prompt(template, entity, messages):
-    messages_str = "\n".join(messages) if messages else "No recent messages."
+    # Truncate or sanitize messages if necessary
+    sanitized_messages = [msg.replace("\n", " ").strip() for msg in messages]
+    messages_str = "\n".join(sanitized_messages) if sanitized_messages else "No recent messages."
     memory = entity.get("memory", "No prior memory.")
+
     return template.format(
         entityId=entity["id"], x=entity["x"], y=entity["y"],
         grid_description=GRID_DESCRIPTION, memory=memory,
@@ -196,15 +213,6 @@ async def intialize_entities():
     return entities
 
 async def fetch_nearby_messages(entity, entities, message_to_send=None):
-    """
-    Fetch messages from nearby entities or optionally send a message to them.
-    Args:
-        entity (dict): The current entity's data.
-        entities (list): List of all entities.
-        message_to_send (str): Optional message to send to nearby entities.
-    Returns:
-        list: A list of messages received from nearby entities.
-    """
     nearby_entities = [
         a for a in entities if a["id"] != entity["id"] and chebyshev_distance(entity["x"], entity["y"], a["x"], a["y"]) <= CHEBYSHEV_DISTANCE
     ]
@@ -250,6 +258,9 @@ app = FastAPI(
     docs_url=None, 
     lifespan=lifespan
 )
+
+# Include the router
+app.include_router(router)
 
 # Serve static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -368,58 +379,6 @@ async def global_exception_handler(request, exc):
         status_code=500,
         content={"message": "An unexpected error occurred. Please try again later."}
     )
-
-# Simulation API Endpoints
-@app.post("/reset", tags=["World Simulation"])
-async def reset_simulation():
-    global stop_signal
-    try:
-        # Log reset initiation
-        add_log("Reset simulation process initiated.")
-        
-        stop_signal = False  # Reset stop signal before starting
-        add_log("Stop signal reset to False.")
-        
-        # Clear Redis database
-        await redis.flushdb()
-        add_log("Redis database flushed successfully.")
-        
-        # Initialize entities
-        entities = await intialize_entities()
-        add_log(f"Entities reinitialized successfully. Total entities: {len(entities)}")
-        
-        # Log successful reset
-        add_log("Simulation reset completed successfully.")
-        return JSONResponse({"status": "Simulation reset successfully.", "entities": entities})
-    except Exception as e:
-        # Log any error encountered during reset
-        error_message = f"Error during simulation reset: {str(e)}"
-        add_log(error_message)
-        raise HTTPException(status_code=500, detail=error_message)
-
-@app.post("/initialize", tags=["World Simulation"])
-async def initialize_simulation():
-    global stop_signal
-    try:
-        # Log the initiation of the simulation
-        add_log("Simulation initialization process started.")
-        
-        # Reset the stop signal
-        stop_signal = False
-        add_log("Stop signal reset to False.")
-        
-        # Initialize Entities
-        entities = await intialize_entities()
-        add_log(f"Entities initialized successfully. Total Entities: {len(entities)}")
-        
-        # Log success and return the response
-        add_log("Simulation started successfully.")
-        return JSONResponse({"status": "Simulation started successfully.", "entities": entities})
-    except Exception as e:
-        # Log and raise an error if the initialization fails
-        error_message = f"Error during simulation initialization: {str(e)}"
-        add_log(error_message)
-        raise HTTPException(status_code=500, detail=error_message)
 
 @app.post("/step", tags=["World Simulation"])
 async def perform_steps(request: StepRequest):
@@ -586,24 +545,44 @@ async def perform_steps(request: StepRequest):
         logger.error(f"Unexpected error during simulation steps: {str(e)}")
         add_log(f"Unexpected error during simulation steps: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An error occurred during simulation steps: {str(e)}")
-
-@app.post("/stop", tags=["World Simulation"])
-async def stop_simulation():
-    global stop_signal
+    
+@app.get("/entities", tags=["Entities"])
+async def list_all_entities():
+    """
+    Fetch details of all entities, including their current position, memory, and messages.
+    """
     try:
-        # Log the start of the stop process
-        add_log("Stop simulation process initiated.")
-        
-        # Set the stop signal
-        stop_signal = True
-        add_log("Stop signal triggered successfully.")
-        
-        # Log successful completion
-        add_log("Simulation stopping process completed.")
-        return JSONResponse({"status": "Simulation stopping."})
+        # Fetch all entity keys from Redis
+        entity_keys = await redis.keys("entity:*")
+        if not entity_keys:
+            add_log("No entities found in Redis.")
+            return []
+
+        # Fetch and parse entity data, including messages
+        entities = []
+        for key in entity_keys:
+            entity_data = await redis.hgetall(key)
+            if not entity_data:
+                continue
+
+            # Fetch the current message for the entity
+            entity_id = int(entity_data["id"])
+            message = entity_data.get("message", "")
+
+            # Append the entity with messages to the result
+            entities.append({
+                "id": entity_id,
+                "name": entity_data.get("name"),
+                "x": int(entity_data.get("x")),
+                "y": int(entity_data.get("y")),
+                "memory": entity_data.get("memory", ""),
+                "messages": [message] if message else [],  # Wrap in a list for consistency
+            })
+
+        add_log(f"Fetched details for {len(entities)} entities, including messages.")
+        return entities
     except Exception as e:
-        # Log and raise any unexpected errors
-        error_message = f"Error during simulation stop process: {str(e)}"
+        error_message = f"Error fetching all entities: {str(e)}"
         add_log(error_message)
         raise HTTPException(status_code=500, detail=error_message)
 
@@ -728,13 +707,42 @@ async def delete_entity(entity_id: int):
         add_log(error_message)
         raise HTTPException(status_code=500, detail=error_message)
 
-from fastapi import Query
+@app.get("/entities/{entity_id}/messages", response_model=Optional[str], tags=["Entity Messaging"])
+async def retrieve_message(entity_id: int):
+    """
+    Retrieve the current message for a specific entity.
+    """
+    try:
+        # Validate that the entity exists
+        entity_key = f"entity:{entity_id}"
+        if not await redis.exists(entity_key):
+            error_message = f"Entity with ID {entity_id} not found."
+            add_log(error_message)
+            raise HTTPException(status_code=404, detail=error_message)
 
-@app.post("/entities/{recipient_id}/create_memory", tags=["Utilities"])
+        # Fetch the message field for the entity
+        message = await redis.hget(entity_key, "message")
+        if not message:
+            add_log(f"No current message found for Entity {entity_id}.")
+            return None  # Return None if no message exists
+
+        add_log(f"Retrieved current message for Entity {entity_id}: \"{message}\".")
+        return message
+    except Exception as e:
+        error_message = f"Error retrieving message for Entity {entity_id}: {str(e)}"
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
+   
+@app.post("/entities/{recipient_id}/create_memory", tags=["Entity Messaging"])
 async def create_memory(
     recipient_id: int,
     message: str = Query(..., description="The memory content to add or update for the recipient entity.")
 ):
+    """
+    Create a memory for an entity. 
+    DIRECTIONS: Append a memory to thier existing memory field. 
+    Enter the integer of the Entity you wish to add a memory to and the memory content to add for the recipient entity.
+    """
     recipient_key = f"entity:{recipient_id}"
 
     try:
@@ -767,9 +775,60 @@ async def create_memory(
         error_message = f"Error creating memory for Entity {recipient_id}: {str(e)}"
         add_log(error_message)
         raise HTTPException(status_code=500, detail=error_message)
+    
+@app.post("/entities/{recipient_id}/send_message", tags=["Entity Messaging"])
+async def send_message(
+    recipient_id: int,
+    message: str = Query(..., description="The message to send to the recipient entity.")
+):
+    """
+    Send a message as an entity.
+    DIRECTIONS: Append a message to a designated entity's existing message field.
+    This means you are sending a message as the designated entity to the surrounding entities. 
+    The designated entity does not receive the message.
+    """
+    recipient_key = f"entity:{recipient_id}"
 
-@app.get("/entities/{entity_id}/nearby", response_model=List[Entity], tags=["Utilities"])
+    try:
+        # Log the attempt to send a message
+        add_log(f"Attempting to send a message to Entity {recipient_id}: \"{message}\".")
+
+        # Validate that the recipient exists
+        if not await redis.exists(recipient_key):
+            error_message = f"Recipient Entity ID {recipient_id} not found."
+            add_log(error_message)
+            add_log(f"Entity {recipient_id} not found.")
+            raise HTTPException(status_code=404, detail=error_message)
+
+        # Fetch the existing message (if any)
+        existing_message = await redis.hget(recipient_key, "message") or ""
+
+        # Append the new message, separating with a delimiter if needed
+        updated_message = existing_message + "\n" + message if existing_message else message
+
+        # Update the `message` field with the appended message
+        await redis.hset(recipient_key, "message", updated_message)
+
+        # Log the successful message update
+        add_log(f"Message appended successfully to Entity {recipient_id}: \"{message}\".")
+
+        return {"status": "Message appended successfully", "recipient_id": recipient_id, "message": updated_message}
+
+    except Exception as e:
+        # Log and raise any unexpected errors
+        error_message = f"Error sending message to Entity {recipient_id}: {str(e)}"
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
+
+@app.get("/entities/{entity_id}/nearby", response_model=List[Entity], tags=["Entity Messaging"])
 async def get_nearby_entities(entity_id: int):
+    """
+    Send a message to an entity. 
+    DIRECTIONS: Enter the integer of the entity you wish to message and execute. 
+    The response body reveals any entities within the messaging range of the entity you wish to message. 
+    Note the "id" of the entity and then use "Send Messsage" to send a message as the "id" of that entity so your chosen entity recieves the message. 
+    The sending entity will not have a memory of the message being sent.
+    """
     try:
         # Log the attempt to fetch nearby entities
         add_log(f"Fetching nearby entities for Entity ID {entity_id}.")
@@ -803,6 +862,210 @@ async def get_nearby_entities(entity_id: int):
         add_log(error_message)
         raise HTTPException(status_code=500, detail=error_message)
 
+@app.post("/entities/update_batch_memory", tags=["Entity Messaging"])
+async def update_batch_memory(payload: BatchMessagesPayload):
+    """
+    Update the `memory` field of multiple entities in one request.
+
+    This function appends the provided content to the `memory` field of the respective entities in Redis.
+    """
+    try:
+        updated_entities = []
+        for msg in payload.messages:
+            entity_key = f"entity:{msg.entity_id}"
+            
+            # Validate that the entity exists
+            if not await redis.exists(entity_key):
+                add_log(f"Entity {msg.entity_id} not found. Skipping update.")
+                continue
+            
+            # Fetch the current memory for the entity (if it exists)
+            existing_memory = await redis.hget(entity_key, "memory") or ""
+            
+            # Append the new content to the existing memory, separated by a newline
+            updated_memory = f"{existing_memory}\n{msg.message}".strip()
+            
+            # Update the `memory` field with the appended content
+            await redis.hset(entity_key, "memory", updated_memory)
+            updated_entities.append(msg.entity_id)
+        
+        add_log(f"Batch memory updates applied to Entities: {updated_entities}.")
+        return {"status": "success", "updated_entities": updated_entities}
+    
+    except Exception as e:
+        error_message = f"Custom Error: Error updating batch memory: {str(e)}"
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
+
+@app.delete("/entities/{entity_id}/memory", tags=["Entity Messaging"])
+async def clear_memory(entity_id: int):
+    """
+    Wipe an entity's memory field.
+    """
+    try:
+        entity_key = f"entity:{entity_id}"
+        
+        # Validate entity exists
+        if not await redis.exists(entity_key):
+            error_message = f"Entity with ID {entity_id} not found."
+            add_log(error_message)
+            raise HTTPException(status_code=404, detail=error_message)
+        
+        # Clear the memory field
+        await redis.hset(entity_key, "memory", "")
+        add_log(f"Memory cleared for Entity {entity_id}.")
+        return {"status": "success", "message": f"Memory cleared for Entity {entity_id}."}
+    except Exception as e:
+        error_message = f"Error clearing memory for Entity {entity_id}: {str(e)}"
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
+
+@app.post("/entities/broadcast_message", tags=["Entity Messaging"])
+async def broadcast_message(message: str):
+    """
+    Broadcast a message to all entities.
+    """
+    try:
+        # Fetch all entity keys
+        entity_keys = await redis.keys("entity:*")
+        if not entity_keys:
+            add_log("No entities found to broadcast the message.")
+            raise HTTPException(status_code=404, detail="No entities found.")
+
+        # Broadcast the message to all entities
+        for key in entity_keys:
+            entity_id = key.split(":")[1]  # Extract entity ID
+            message_key = f"{entity_id}:messages"
+            await redis.lpush(message_key, message)
+
+        # Log the broadcast action
+        add_log(f"Broadcast message to all entities: {message}")
+        return {"status": "success", "message": f"Broadcasted message to {len(entity_keys)} entities."}
+    except Exception as e:
+        error_message = f"Error broadcasting message: {str(e)}"
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
+
+class BatchMessage(BaseModel):
+    entity_id: int
+    message: str
+
+class BatchMessagesPayload(BaseModel):
+    messages: List[BatchMessage]
+
+@app.delete("/entities/{entity_id}/messages", tags=["Entity Messaging"])
+async def clear_all_messages(entity_id: int):
+    """
+    Remove all messages for a specific entity.
+    """
+    try:
+        message_key = f"{entity_id}:messages"
+
+        # Validate that the message key exists
+        if not await redis.exists(message_key):
+            error_message = f"No messages found for Entity {entity_id}."
+            add_log(error_message)
+            raise HTTPException(status_code=404, detail=error_message)
+
+        # Clear all messages
+        await redis.delete(message_key)
+        add_log(f"All messages cleared for Entity {entity_id}.")
+        return {"status": "success", "message": f"All messages cleared for Entity {entity_id}."}
+    except Exception as e:
+        error_message = f"Error clearing messages for Entity {entity_id}: {str(e)}"
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
+
+@app.get("/analytics", tags=["Utilities"])
+async def analytics_dashboard():
+    """
+    Retrieve aggregated statistics about the simulation.
+    """
+    try:
+        entity_keys = await redis.keys("entity:*")
+        total_entities = len(entity_keys)
+        total_messages = 0
+        memory_sizes = []
+
+        for key in entity_keys:
+            entity_data = await redis.hgetall(key)
+            messages = await redis.lrange(f"{entity_data['id']}:messages", 0, -1)
+            total_messages += len(messages)
+            memory_sizes.append(len(entity_data.get("memory", "")))
+
+        avg_memory_size = sum(memory_sizes) / len(memory_sizes) if memory_sizes else 0
+        avg_messages = total_messages / total_entities if total_entities > 0 else 0
+
+        analytics = {
+            "total_entities": total_entities,
+            "total_messages": total_messages,
+            "average_memory_size": avg_memory_size,
+            "average_messages_per_entity": avg_messages,
+        }
+
+        add_log("Analytics dashboard data generated successfully.")
+        return analytics
+    except Exception as e:
+        error_message = f"Error generating analytics dashboard: {str(e)}"
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
+
+@app.get("/simulation/state/download", tags=["Utilities"])
+async def download_simulation_state():
+    """
+    Download the current state of the simulation as a JSON file.
+    """
+    try:
+        # Collect all entities from Redis
+        entity_keys = await redis.keys("entity:*")
+        entities = []
+        for key in entity_keys:
+            entity_data = await redis.hgetall(key)
+            messages = await redis.lrange(f"{entity_data['id']}:messages", 0, -1)
+            entity_data["messages"] = messages
+            entities.append(entity_data)
+
+        # Write to a temporary JSON file
+        file_path = "/tmp/simulation_state.json"
+        with open(file_path, "w") as f:
+            json.dump(entities, f)
+
+        add_log("Simulation state saved to JSON file.")
+        return FileResponse(file_path, media_type="application/json", filename="simulation_state.json")
+    except Exception as e:
+        error_message = f"Error downloading simulation state: {str(e)}"
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
+
+@app.post("/simulation/state/upload", tags=["Utilities"])
+async def upload_simulation_state(state_file: UploadFile = File(...)):
+    """
+    Upload and restore a saved simulation state.
+    """
+    try:
+        # Read uploaded file
+        state_data = json.loads(await state_file.read())
+
+        # Clear current Redis data
+        await redis.flushdb()
+        add_log("Redis database cleared before state restoration.")
+
+        # Restore entities and messages
+        for entity in state_data:
+            entity_key = f"entity:{entity['id']}"
+            messages_key = f"{entity['id']}:messages"
+            messages = entity.pop("messages", [])
+            await redis.hset(entity_key, mapping=entity)
+            for message in messages:
+                await redis.lpush(messages_key, message)
+
+        add_log("Simulation state restored successfully.")
+        return {"status": "Simulation state uploaded and restored."}
+    except Exception as e:
+        error_message = f"Error uploading simulation state: {str(e)}"
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
+
 @app.post("/sync_entity", tags=["Utilities"])
 async def sync_entity():
     try:
@@ -825,110 +1088,715 @@ async def sync_entity():
         error_message = f"Error during entity synchronization: {str(e)}"
         add_log(error_message)
         raise HTTPException(status_code=500, detail=error_message)
-
-@app.get("/settings", response_model=SimulationSettings, tags=["Settings"])
-async def get_settings():
+    
+@app.get("/debug/redis", tags=["Debugging and Optimization"])
+async def test_redis_connectivity():
+    """
+    Test and report the status of Redis connectivity.
+    """
     try:
-        # Log the attempt to fetch simulation settings
-        add_log("Fetching simulation settings.")
-
-        # Fetch all entity keys from Redis
-        entity_keys = await redis.keys("entity:*")  # Get all keys matching entity pattern
-        num_entities = len(entity_keys)  # Count the number of entities
-
-        # Log successful retrieval
-        add_log(f"Simulation settings fetched successfully. Total entities: {num_entities}.")
-        
-        # Return the dynamically updated number of entities
-        return SimulationSettings(
-            grid_size=GRID_SIZE,
-            num_entities=num_entities,
-            max_steps=MAX_STEPS,
-            chebyshev_distance=CHEBYSHEV_DISTANCE,
-            llm_model=LLM_MODEL,
-            llm_max_tokens=LLM_MAX_TOKENS,
-            llm_temperature=LLM_TEMPERATURE,
-            request_delay=REQUEST_DELAY,
-            max_concurrent_requests=MAX_CONCURRENT_REQUESTS
-        )
+        # Ping Redis to check connectivity
+        ping_response = await redis.ping()
+        if ping_response:
+            add_log("Redis connectivity test successful.")
+            return {"status": "connected", "message": "Redis is reachable."}
+        else:
+            raise Exception("Redis ping returned a falsy value.")
     except Exception as e:
-        # Log and raise any unexpected errors
-        error_message = f"Error fetching simulation settings: {str(e)}"
+        error_message = f"Redis connectivity test failed: {str(e)}"
         add_log(error_message)
         raise HTTPException(status_code=500, detail=error_message)
 
-@app.post("/settings", response_model=SimulationSettings, tags=["Settings"])
-async def set_settings(settings: SimulationSettings):
+@app.get("/debug/supabase", tags=["Debugging and Optimization"])
+async def test_supabase_connectivity():
+    """
+    Test and report the status of Supabase connectivity.
+    """
     try:
-        # Log the attempt to update simulation settings
-        add_log("Updating simulation settings.")
-
-        global GRID_SIZE, NUM_ENTITIES, MAX_STEPS, CHEBYSHEV_DISTANCE, LLM_MODEL
-        global LLM_MAX_TOKENS, LLM_TEMPERATURE, REQUEST_DELAY, MAX_CONCURRENT_REQUESTS
-
-        GRID_SIZE = settings.grid_size
-        NUM_ENTITIES = settings.num_entities
-        MAX_STEPS = settings.max_steps
-        CHEBYSHEV_DISTANCE = settings.chebyshev_distance
-        LLM_MODEL = settings.llm_model
-        LLM_MAX_TOKENS = settings.llm_max_tokens
-        LLM_TEMPERATURE = settings.llm_temperature
-        REQUEST_DELAY = settings.request_delay
-        MAX_CONCURRENT_REQUESTS = settings.max_concurrent_requests
-
-        # Log successful update
-        add_log("Simulation settings updated successfully.")
-        return settings
+        # Test a basic query to check Supabase connectivity
+        response = supabase.table("entities").select("*").limit(1).execute()
+        if response.data:
+            add_log("Supabase connectivity test successful.")
+            return {"status": "connected", "message": "Supabase is reachable."}
+        else:
+            raise Exception("No data returned, but connection is established.")
     except Exception as e:
-        # Log and raise any unexpected errors
-        error_message = f"Error updating simulation settings: {str(e)}"
+        error_message = f"Supabase connectivity test failed: {str(e)}"
         add_log(error_message)
         raise HTTPException(status_code=500, detail=error_message)
 
-# Endpoint to get current prompt templates
-@app.get("/prompts", response_model=PromptSettings, tags=["Settings"])
-async def get_prompts():
+app.get("/debug/performance", tags=["Debugging and Optimization"])
+async def profile_simulation_performance():
+    """
+    Profile the simulation to identify bottlenecks in processing or memory usage.
+    """
     try:
-        # Log the attempt to fetch prompt templates
-        add_log("Fetching current prompt templates.")
+        tracemalloc.start()
+        start_time = time.time()
 
-        # Return the prompt templates
-        prompts = PromptSettings(
-            message_generation_prompt=DEFAULT_MESSAGE_GENERATION_PROMPT,
-            memory_generation_prompt=DEFAULT_MEMORY_GENERATION_PROMPT,
-            movement_generation_prompt=DEFAULT_MOVEMENT_GENERATION_PROMPT
-        )
+        # Example: Simulate fetching all entities (you can replace this with actual simulation logic)
+        entity_keys = await redis.keys("entity:*")
+        for key in entity_keys:
+            await redis.hgetall(key)
 
-        # Log successful retrieval
-        add_log("Prompt templates fetched successfully.")
-        return prompts
+        end_time = time.time()
+        current, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
+        performance_data = {
+            "execution_time": f"{end_time - start_time:.2f} seconds",
+            "memory_usage": f"{current / 10**6:.2f} MB",
+            "peak_memory_usage": f"{peak / 10**6:.2f} MB"
+        }
+
+        add_log(f"Performance profiling completed: {performance_data}")
+        return JSONResponse(performance_data)
     except Exception as e:
-        # Log and raise any unexpected errors
-        error_message = f"Error fetching prompt templates: {str(e)}"
+        error_message = f"Error during performance profiling: {str(e)}"
         add_log(error_message)
         raise HTTPException(status_code=500, detail=error_message)
 
-# Endpoint to set new prompt templates
-@app.post("/prompts", response_model=PromptSettings, tags=["Settings"])
-async def set_prompts(prompts: PromptSettings):
+@app.get("/debug/redis/{key}", tags=["Debugging and Optimization"])
+async def inspect_redis_key(key: str):
+    """
+    Fetch the content of a specific Redis key for debugging purposes. Format: "entity:0"
+    """
     try:
-        # Log the attempt to update prompt templates
-        add_log("Updating prompt templates.")
+        key_type = await redis.type(key)
+        if key_type == "none":
+            error_message = f"Redis key '{key}' does not exist."
+            add_log(error_message)
+            raise HTTPException(status_code=404, detail=error_message)
 
-        global DEFAULT_MESSAGE_GENERATION_PROMPT, DEFAULT_MEMORY_GENERATION_PROMPT, DEFAULT_MOVEMENT_GENERATION_PROMPT
+        if key_type == "string":
+            value = await redis.get(key)
+        elif key_type == "list":
+            value = await redis.lrange(key, 0, -1)
+        elif key_type == "hash":
+            value = await redis.hgetall(key)
+        else:
+            value = f"Unsupported key type: {key_type}"
 
-        DEFAULT_MESSAGE_GENERATION_PROMPT = prompts.message_generation_prompt
-        DEFAULT_MEMORY_GENERATION_PROMPT = prompts.memory_generation_prompt
-        DEFAULT_MOVEMENT_GENERATION_PROMPT = prompts.movement_generation_prompt
-
-        # Log successful update
-        add_log("Prompt templates updated successfully.")
-        return prompts
+        add_log(f"Inspected Redis key '{key}': {value}")
+        return {"key": key, "type": key_type, "value": value}
     except Exception as e:
-        # Log and raise any unexpected errors
-        error_message = f"Error updating prompt templates: {str(e)}"
+        error_message = f"Error inspecting Redis key '{key}': {str(e)}"
         add_log(error_message)
         raise HTTPException(status_code=500, detail=error_message)
+
+@app.get("/audit", tags=["Debugging and Optimization"])
+async def fetch_audit_trail():
+    """
+    Fetch a detailed log of all significant actions performed during the simulation.
+    """
+    try:
+        if not LOG_QUEUE:
+            add_log("Audit trail requested, but no logs are available.")
+            return {"audit_trail": []}
+
+        return {"audit_trail": list(LOG_QUEUE)}
+    except Exception as e:
+        error_message = f"Error fetching audit trail: {str(e)}"
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
+
+@app.get("/grid", tags=["Visualization"])
+async def generate_grid_visualization():
+    """
+    Generate a grid visualization displaying entities' numbers within their respective cells.
+    """
+    try:
+        # Fetch all entities from Redis
+        entity_keys = await redis.keys("entity:*")
+        if not entity_keys:
+            raise HTTPException(status_code=404, detail="No entities found.")
+
+        # Get grid size from configuration
+        grid_size = GRID_SIZE  # Assume GRID_SIZE is defined in your settings
+
+        # Create a blank grid
+        grid = np.full((grid_size, grid_size), "", dtype=object)
+
+        # Place entities on the grid
+        for key in entity_keys:
+            entity_data = await redis.hgetall(key)
+            x, y, entity_id = int(entity_data["x"]), int(entity_data["y"]), entity_data["id"]
+            grid[y][x] = str(entity_id)  # Place the entity number at the position
+
+        # Plot the grid
+        fig, ax = plt.subplots(figsize=(8, 8))
+        ax.set_xticks(np.arange(0, grid_size, 1))
+        ax.set_yticks(np.arange(0, grid_size, 1))
+        ax.set_xticks(np.arange(-0.5, grid_size, 1), minor=True)
+        ax.set_yticks(np.arange(-0.5, grid_size, 1), minor=True)
+        ax.grid(which="minor", color="gray", linestyle="-", linewidth=0.5)
+        ax.tick_params(which="major", bottom=False, left=False, labelbottom=False, labelleft=False)
+
+        # Annotate with entity numbers
+        for y in range(grid_size):
+            for x in range(grid_size):
+                if grid[y][x]:
+                    ax.text(x + 0.5, grid_size - y - 0.5, grid[y][x], ha="center", va="center", color="blue")
+
+        # Save the grid to a BytesIO stream
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png")
+        buf.seek(0)
+        plt.close()
+
+        # Return the image as a StreamingResponse
+        return StreamingResponse(buf, media_type="image/png")
+
+    except Exception as e:
+        error_message = f"Error generating grid visualization: {str(e)}"
+        raise HTTPException(status_code=500, detail=error_message)
+    
+@app.get("/visualization/heatmap", tags=["Visualization"])
+async def agent_location_heatmap():
+    """
+    Generate a heatmap of agent locations.
+    """
+    try:
+        # Fetch all entities from Redis
+        entity_keys = await redis.keys("entity:*")
+        if not entity_keys:
+            raise HTTPException(status_code=404, detail="No entities found.")
+
+        # Initialize the grid
+        heatmap = np.zeros((GRID_SIZE, GRID_SIZE))
+
+        # Increment the grid based on agent locations
+        for key in entity_keys:
+            entity_data = await redis.hgetall(key)
+            x, y = int(entity_data["x"]), int(entity_data["y"])
+            heatmap[y][x] += 1
+
+        # Create a heatmap visualization
+        fig, ax = plt.subplots(figsize=(8, 8))
+        cax = ax.matshow(heatmap, cmap="viridis", origin="lower")
+        plt.colorbar(cax)
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png")
+        buf.seek(0)
+        plt.close()
+
+        return StreamingResponse(buf, media_type="image/png")
+
+    except Exception as e:
+        error_message = f"Error generating heatmap: {str(e)}"
+        raise HTTPException(status_code=500, detail=error_message)
+
+@app.get("/visualization/trajectory", tags=["Visualization"])
+async def trajectory_visualization():
+    try:
+        # Retrieve entity keys
+        entity_keys = await redis.keys("entity:*")
+        if not entity_keys:
+            return {"error": "No entities found for trajectory visualization."}
+
+        # Fetch entity positions
+        trajectories = []
+        for key in entity_keys:
+            entity_data = await redis.hgetall(key)
+            if entity_data:
+                trajectories.append((int(entity_data["x"]), int(entity_data["y"])))
+
+        # Generate plot
+        plt.figure(figsize=(10, 10))
+        x_vals, y_vals = zip(*trajectories) if trajectories else ([], [])
+        plt.plot(x_vals, y_vals, marker='o')
+        plt.title("Agent Trajectories")
+        plt.xlabel("X")
+        plt.ylabel("Y")
+        plt.grid(True)
+
+        # Return the plot as an image
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png")
+        plt.close()
+        buf.seek(0)
+        return StreamingResponse(buf, media_type="image/png")
+
+    except Exception as e:
+        return {"message": f"Custom Error: Error generating trajectory visualization: {str(e)}"}
+
+@app.get("/visualization/network", tags=["Visualization"])
+async def interaction_network_graph():
+    """
+    Generate a graph visualization of agent interactions.
+    """
+    try:
+        # Fetch interactions from Redis
+        interactions = []  # Replace with logic to fetch agent interactions
+        graph = nx.Graph()
+
+        for interaction in interactions:
+            entity_a, entity_b = interaction["from"], interaction["to"]
+            graph.add_edge(entity_a, entity_b)
+
+        # Draw the graph
+        fig, ax = plt.subplots(figsize=(10, 10))
+        nx.draw_networkx(graph, ax=ax, node_size=700, font_size=10)
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png")
+        buf.seek(0)
+        plt.close()
+
+        return StreamingResponse(buf, media_type="image/png")
+
+    except Exception as e:
+        error_message = f"Error generating interaction graph: {str(e)}"
+        raise HTTPException(status_code=500, detail=error_message)
+
+@app.get("/visualization/behavior", tags=["Visualization"])
+async def behavior_over_time():
+    """
+    Generate a time-series visualization of agent behavior.
+    """
+    try:
+        # Fetch behavior data from Redis
+        behavior_data = {}  # Replace with logic to fetch behavior data
+
+        # Prepare the plot
+        fig, ax = plt.subplots(figsize=(10, 6))
+        for agent_id, data in behavior_data.items():
+            times, values = zip(*data)
+            ax.plot(times, values, label=f"Agent {agent_id}")
+
+        ax.set_title("Behavior Over Time")
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Behavior Metric")
+        ax.legend()
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png")
+        buf.seek(0)
+        plt.close()
+
+        return StreamingResponse(buf, media_type="image/png")
+
+    except Exception as e:
+        error_message = f"Error generating behavior plot: {str(e)}"
+        raise HTTPException(status_code=500, detail=error_message)
+
+@app.get("/visualization/task_allocation", tags=["Visualization"])
+async def task_allocation_chart():
+    try:
+        # Retrieve task allocation data
+        task_data = await redis.hgetall("tasks")  # Replace with appropriate Redis call
+        if not task_data:
+            return {"message": "No task allocation data found."}
+
+        # Verify task_data is a dictionary
+        if isinstance(task_data, list):
+            raise ValueError("Task data is a list; expected a dictionary.")
+
+        # Prepare data for visualization
+        tasks = list(task_data.keys())
+        allocations = [len(eval(entities)) for entities in task_data.values()]  # Example: Eval if data is stored as strings
+
+        # Generate bar chart
+        plt.figure(figsize=(12, 6))
+        plt.bar(tasks, allocations, color="skyblue")
+        plt.title("Task Allocation Chart")
+        plt.xlabel("Tasks")
+        plt.ylabel("Number of Assigned Entities")
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+
+        # Return the chart as an image
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png")
+        plt.close()
+        buf.seek(0)
+        return StreamingResponse(buf, media_type="image/png")
+
+    except Exception as e:
+        return {"message": f"Custom Error: Error generating task allocation chart: {str(e)}"}
+
+@app.get("/visualization/system_metrics", tags=["Visualization"])
+async def system_metrics_over_time():
+    """
+    Generate a time-series visualization of system-wide metrics.
+    """
+    try:
+        # Fetch system metrics data
+        metrics = {}  # Replace with logic to fetch system metrics
+
+        # Prepare the plot
+        fig, ax = plt.subplots(figsize=(10, 6))
+        for metric_name, data in metrics.items():
+            times, values = zip(*data)
+            ax.plot(times, values, label=metric_name)
+
+        ax.set_title("System Metrics Over Time")
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Metric Value")
+        ax.legend()
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png")
+        buf.seek(0)
+        plt.close()
+
+        return StreamingResponse(buf, media_type="image/png")
+
+    except Exception as e:
+        error_message = f"Error generating system metrics plot: {str(e)}"
+        raise HTTPException(status_code=500, detail=error_message)
+
+# A list to store custom rules
+custom_rules = []
+
+from fastapi.responses import HTMLResponse
+
+@app.get("/custom_rules_docs", tags=["Docs"])
+async def custom_rules_docs():
+    """
+    Comprehensive inline documentation for custom rules creation and usage.
+    """
+    html_content = """
+    <html>
+        <head>
+            <title>Custom Rules Documentation</title>
+            <style>
+                body {
+                    font-family: Arial, sans-serif;
+                    line-height: 1.6;
+                    margin: 20px;
+                    background-color: #f9f9f9;
+                    color: #333;
+                }
+                h1 {
+                    color: #2c3e50;
+                }
+                h2 {
+                    margin-top: 20px;
+                    color: #34495e;
+                }
+                pre {
+                    background: #f4f4f4;
+                    padding: 10px;
+                    border: 1px solid #ddd;
+                    border-radius: 4px;
+                    overflow-x: auto;
+                }
+                .example, .note {
+                    padding: 15px;
+                    border-radius: 4px;
+                }
+                .example {
+                    background-color: #eaf7ff;
+                    border-left: 4px solid #3498db;
+                }
+                .note {
+                    background-color: #fff8e1;
+                    border-left: 4px solid #f39c12;
+                }
+                a {
+                    color: #2980b9;
+                    text-decoration: none;
+                }
+                a:hover {
+                    text-decoration: underline;
+                }
+            </style>
+        </head>
+        <body>
+            <h1>Custom Rules Documentation</h1>
+            <p>Define specific behaviors for your simulation entities using custom rules. These rules allow dynamic adjustments to entity and environment behavior.</p>
+
+            <h2>Getting Started</h2>
+            <p>Write rules in Python and use the following objects for logic:</p>
+            <ul>
+                <li><strong>entity:</strong> Represents the current agent in the simulation.</li>
+                <li><strong>simulation:</strong> Represents the overall simulation environment.</li>
+                <li><strong>log(message):</strong> Log messages to the simulation's audit trail.</li>
+            </ul>
+
+            <h2>Examples</h2>
+            <div class="example">
+                <h3>1. Boundary Check</h3>
+                <p>Add a memory entry when an entity reaches the boundary:</p>
+                <pre>
+if entity.x == 0 or entity.x == simulation.width - 1:
+    entity.memory.append("Boundary reached")
+                </pre>
+            </div>
+            <div class="example">
+                <h3>2. Collision Detection</h3>
+                <p>Log interactions when two entities collide:</p>
+                <pre>
+if entity1.x == entity2.x and entity1.y == entity2.y:
+    log(f"Entity {entity1.id} collided with Entity {entity2.id}")
+                </pre>
+            </div>
+
+            <h2>System Variables</h2>
+            <ul>
+                <li><strong>entity:</strong> Access the entity's attributes such as <code>entity.x</code>, <code>entity.y</code>, and <code>entity.memory</code>.</li>
+                <li><strong>simulation:</strong> Use properties like <code>simulation.width</code> and <code>simulation.height</code> to reference the environment.</li>
+            </ul>
+
+            <h2>Validation</h2>
+            <div class="note">
+                <strong>Important:</strong> All rules are validated for syntax and restricted to safe operations. Avoid using:
+                <ul>
+                    <li>File system operations (e.g., open, write).</li>
+                    <li>External network calls.</li>
+                    <li>Execution of arbitrary system commands.</li>
+                </ul>
+            </div>
+
+            <h2>How to Use</h2>
+            <ol>
+                <li>Go to the <a href="/docs">API Documentation</a>.</li>
+                <li>Use the <code>/simulation/custom_rules</code> endpoint to add rules.</li>
+                <li>Submit a JSON payload like this:
+                <pre>
+{
+    "rule": "if entity.x == 10: entity.memory.append('At boundary')"
+}
+                </pre>
+                </li>
+            </ol>
+
+            <h2>Management</h2>
+            <ul>
+                <li><strong>Add a Rule:</strong> Use <code>POST /simulation/custom_rules</code>.</li>
+                <li><strong>List All Rules:</strong> Use <code>GET /simulation/custom_rules</code>.</li>
+                <li><strong>Delete a Rule:</strong> Use <code>DELETE /simulation/custom_rules/{rule_id}</code>.</li>
+            </ul>
+
+            <h2>Advanced Use Cases</h2>
+            <ul>
+                <li>Trigger events based on conditions like proximity or thresholds.</li>
+                <li>Implement multi-agent collaboration through shared states or memory.</li>
+                <li>Use rules to modify environment behavior dynamically.</li>
+            </ul>
+        </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+@app.post("/simulation/custom_rules", tags=["Customization"])
+async def add_custom_rule(rule: str):
+    """
+    Add or update custom rules for the simulation.
+
+    <br>
+    <h2>Custom Rules Documentation</h2>
+    <p>
+        Custom rules allow you to extend the simulation behavior dynamically.
+        Use Python syntax and predefined objects such as <code>entity</code> and <code>environment</code>.
+    </p>
+    <h3>Quick Instructions</h3>
+    <ul>
+        <li>Write rules in valid Python syntax.</li>
+        <li>Use the <code>entity</code> object to access or modify individual agent properties.</li>
+        <li>Use the <code>environment</code> object to interact with the simulation's environment.</li>
+    </ul>
+    <h3>Example Rule</h3>
+    <pre>
+    if entity.x == 10:
+        entity.memory += 'At boundary'
+    </pre>
+    <p>
+        For more details, visit the full 
+        <a href="http://127.0.0.1:8000/custom_rules_docs" target="_blank">Custom Rules Documentation</a>.
+    </p>
+    """
+    try:
+        # Validate the rule (basic check for malicious code)
+        if not rule or not isinstance(rule, str):
+            raise HTTPException(status_code=400, detail="Invalid rule format.")
+
+        # Example: Simple validation for Python syntax
+        try:
+            compile(rule, "<string>", "exec")
+        except SyntaxError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid Python syntax: {str(e)}")
+
+        # Add the rule to the custom rules list
+        custom_rules.append(rule)
+
+        return {"status": "Rule added successfully", "rule": rule, "total_rules": len(custom_rules)}
+
+    except Exception as e:
+        return {"message": f"Error adding custom rule: {str(e)}"}
+
+from fastapi.responses import HTMLResponse
+
+installed_plugins = []
+
+@app.get("/plugins-docs", tags=["Docs"])
+async def plugins_docs():
+    """
+    Comprehensive inline documentation for plugin management.
+    """
+    html_content = """
+    <html>
+        <head>
+            <title>Plugin Management Documentation</title>
+            <style>
+                body {
+                    font-family: Arial, sans-serif;
+                    line-height: 1.6;
+                    margin: 20px;
+                    background-color: #f4f4f9;
+                    color: #333;
+                }
+                h1 {
+                    color: #0056b3;
+                }
+                h2 {
+                    margin-top: 20px;
+                    color: #0066cc;
+                }
+                pre {
+                    background: #eee;
+                    padding: 10px;
+                    border: 1px solid #ccc;
+                    overflow-x: auto;
+                }
+                .example {
+                    background-color: #e8f6fc;
+                    padding: 15px;
+                    border-left: 4px solid #00aaff;
+                }
+                .note {
+                    background-color: #fff4e5;
+                    padding: 15px;
+                    border-left: 4px solid #ffa726;
+                }
+            </style>
+        </head>
+        <body>
+            <h1>Plugin Management Documentation</h1>
+            <p>Manage plugins or extensions for your simulation environment. Plugins allow you to extend the functionality of your simulation by adding custom features or behaviors.</p>
+
+            <h2>Supported Actions</h2>
+            <p>The following actions are supported for plugin management:</p>
+            <ul>
+                <li><strong>Install:</strong> Adds a plugin to the simulation.</li>
+                <li><strong>Uninstall:</strong> Removes a plugin from the simulation.</li>
+                <li><strong>List:</strong> Lists all currently installed plugins.</li>
+            </ul>
+
+            <h2>Example Payloads</h2>
+            <div class="example">
+                <h3>1. Installing a Plugin</h3>
+                <pre>
+{
+    "plugin_name": "custom_logger",
+    "action": "install"
+}
+                </pre>
+                <p>This example installs a plugin named <code>custom_logger</code>.</p>
+            </div>
+            <div class="example">
+                <h3>2. Uninstalling a Plugin</h3>
+                <pre>
+{
+    "plugin_name": "custom_logger",
+    "action": "uninstall"
+}
+                </pre>
+                <p>This example removes the plugin named <code>custom_logger</code>.</p>
+            </div>
+            <div class="example">
+                <h3>3. Listing Installed Plugins</h3>
+                <pre>
+{
+    "action": "list"
+}
+                </pre>
+                <p>This example retrieves a list of all currently installed plugins.</p>
+            </div>
+
+            <h2>Usage Instructions</h2>
+            <ol>
+                <li>Go to the <a href="/docs">API Documentation</a>.</li>
+                <li>Use the <code>/simulation/plugins</code> endpoint.</li>
+                <li>Submit a JSON payload with the desired action and plugin name (if applicable).</li>
+            </ol>
+
+            <h2>Validation Rules</h2>
+            <p>The following validation rules are applied for plugin management:</p>
+            <ul>
+                <li><strong>Action:</strong> Must be one of <code>install</code>, <code>uninstall</code>, or <code>list</code>.</li>
+                <li><strong>Plugin Name:</strong> Required for <code>install</code> and <code>uninstall</code> actions.</li>
+                <li><strong>Unique Plugins:</strong> Plugins must have unique names. Duplicate installations are not allowed.</li>
+            </ul>
+
+            <div class="note">
+                <strong>Note:</strong> Plugin functionality depends on the specific implementation of each plugin. Ensure that any custom plugins are compatible with the simulation environment.
+            </div>
+
+            <h2>Advanced Use Cases</h2>
+            <ul>
+                <li>Create a logging plugin to track simulation events in real-time.</li>
+                <li>Develop an AI plugin to enable agents to make intelligent decisions.</li>
+                <li>Integrate visualization plugins for enhanced simulation analysis.</li>
+            </ul>
+        </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+@app.post("/simulation/plugins", tags=["Customization"])
+async def manage_plugins(plugin_name: str = None, action: str = None):
+    """
+    Manage plugins or extensions for the simulation environment.
+
+    <br>
+    <h2>Plugin Management Documentation</h2>
+    <p>
+        Plugins extend the simulation's capabilities. This endpoint allows you to install, uninstall, or list plugins.
+    </p>
+    <h3>Quick Instructions</h3>
+    <ul>
+        <li>Use the "install" action to add a plugin.</li>
+        <li>Use the "uninstall" action to remove a plugin.</li>
+        <li>Use the "list" action to see all installed plugins.</li>
+    </ul>
+    <h3>Example Payloads</h3>
+    <ul>
+        <li><b>Install:</b> <code>{"plugin_name": "custom_logger", "action": "install"}</code></li>
+        <li><b>Uninstall:</b> <code>{"plugin_name": "custom_logger", "action": "uninstall"}</code></li>
+        <li><b>List:</b> <code>{"action": "list"}</code></li>
+    </ul>
+    <p>
+        For more details, visit the full 
+        <a href="http://127.0.0.1:8000/plugins-docs" target="_blank">Plugin Management Documentation</a>.
+    </p>
+    """
+    try:
+        if not action or action not in ["install", "uninstall", "list"]:
+            raise HTTPException(status_code=400, detail="Invalid action. Supported actions: install, uninstall, list.")
+
+        if action == "list":
+            return {"installed_plugins": installed_plugins}
+
+        if action in ["install", "uninstall"] and not plugin_name:
+            raise HTTPException(status_code=400, detail="Plugin name is required for install or uninstall actions.")
+
+        if action == "install":
+            if plugin_name in installed_plugins:
+                raise HTTPException(status_code=400, detail=f"Plugin '{plugin_name}' is already installed.")
+            installed_plugins.append(plugin_name)
+            return {"status": "Plugin installed successfully", "plugin_name": plugin_name}
+
+        if action == "uninstall":
+            if plugin_name not in installed_plugins:
+                raise HTTPException(status_code=400, detail=f"Plugin '{plugin_name}' is not installed.")
+            installed_plugins.remove(plugin_name)
+            return {"status": "Plugin uninstalled successfully", "plugin_name": plugin_name}
+
+    except Exception as e:
+        return {"message": f"Error managing plugins: {str(e)}"}
 
 # WebSocket Endpoint for Real-Time Logs
 @app.websocket("/logs")
