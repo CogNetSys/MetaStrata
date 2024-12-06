@@ -283,18 +283,16 @@ async def custom_swagger_ui_html():
                     style="display: flex; align-items: center; justify-content: space-between; width: 100%; border: none; background: none; padding: 10px 15px; cursor: pointer; font-weight: bold; font-size: 14px;"
                     onclick="toggleLogSection()"
                 >
-                    <span>MetaStrata Logs</span>
+                    <span>Simulation Live Stream</span>
                     <span style="font-size: 18px;">&#x25B2;</span>
                 </button>
             </div>
             <div id="websocket-logs-container" class="opblock-body" style="display: block; padding: 10px; background-color: #f6f6f6; border: 1px solid #e8e8e8; border-radius: 4px;">
                 <div id="websocket-controls" style="text-align: center; margin-bottom: 10px;">
-                    <button id="clear-logs" style="margin-right: 10px; padding: 5px 10px; border-radius: 5px; background-color: #f44336; color: white; border: none; cursor: pointer;">
-                        Clear Logs
-                    </button>
-                    <button id="select-all" style="padding: 5px 10px; border-radius: 5px; background-color: #4caf50; color: white; border: none; cursor: pointer;">
-                        Select All
-                    </button>
+                    <button id="reconnect-stream">Reconnect Live Stream</button>
+                    <button id="select-all">Select All</button>
+                    <button id="copy-logs">Copy Logs</button>
+                    <button id="clear-logs">Clear Logs</button>
                 </div>
                 <div id="websocket-logs" style="background: #f9f9f9; padding: 10px; height: 700px; overflow-y: auto; border: 1px solid #ccc; border-radius: 5px">
                     <p>WebSocket logs will appear here...</p>
@@ -356,6 +354,50 @@ async def custom_swagger_ui_html():
                         selection.addRange(range);
                     });
                 }
+
+                document.addEventListener("DOMContentLoaded", function () {
+                // Get all buttons inside the controls section
+                const buttons = document.querySelectorAll("#websocket-controls button");
+
+                buttons.forEach(button => {
+                    // Add mouseover effect
+                    button.addEventListener("mouseover", function () {
+                        button.style.backgroundColor = "#ddd"; // Light gray background on hover
+                        button.style.cursor = "pointer"; // Pointer cursor on hover
+                    });
+
+                    // Add mouseout effect (reset to original color)
+                    button.addEventListener("mouseout", function () {
+                        if (button.id === "clear-logs") {
+                            button.style.backgroundColor = "#f44336"; // Red for Clear Logs
+                        } else if (button.id === "select-all") {
+                            button.style.backgroundColor = "#4caf50"; // Green for Select All
+                        } else if (button.id === "copy-logs") {
+                            button.style.backgroundColor = "#2196f3"; // Blue for Copy Logs
+                        } else if (button.id === "reconnect-stream") {
+                            button.style.backgroundColor = "#9e9e9e"; // Gray for Reconnect
+                        }
+                    });
+
+                    // Add click effect
+                    button.addEventListener("click", function () {
+                        button.style.backgroundColor = "#aaa"; // Darker shade on click
+                        setTimeout(function () {
+                            // Reset background after click
+                            if (button.id === "clear-logs") {
+                                button.style.backgroundColor = "#f44336";
+                            } else if (button.id === "select-all") {
+                                button.style.backgroundColor = "#4caf50";
+                            } else if (button.id === "copy-logs") {
+                                button.style.backgroundColor = "#2196f3";
+                            } else if (button.id === "reconnect-stream") {
+                                button.style.backgroundColor = "#9e9e9e";
+                            }
+                        }, 200); // Reset after 200ms
+                    });
+                });
+            });
+
             });
         </script>
     '''
