@@ -1,5 +1,12 @@
 from pydantic import BaseModel
 
+class Entity(BaseModel):
+    id: int
+    name: str
+    x: int
+    y: int
+    memory: str = ""
+
 class SimulationSettings(BaseModel):
     grid_size: int
     num_entities: int

@@ -1,10 +1,9 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
+from utils import add_log, LOG_QUEUE, logger
 from config import (
     GRID_SIZE,
     NUM_ENTITIES,
-    logger,
-    add_log,
     REDIS_ENDPOINT,
     REDIS_PASSWORD,
 )
@@ -76,11 +75,7 @@ async def reset_simulation():
 @router.post("/initialize", tags=["World Simulation"])
 async def initialize_simulation():
     """
-    Send a message to an entity. 
-    DIRECTIONS: Enter the integer of the entity you wish to message and execute. 
-    The response body reveals any entities within the messaging range of the entity you wish to message. 
-    Note the "id" of the entity and then use "Send Messsage" to send a message as the "id" of that entity so your chosen entity recieves the message. 
-    The sending entity will not have a memory of the message being sent.
+    Initialize a new world by setting the entities positions at random and assigning names and ids.
     """
     global stop_signal
     try:
@@ -97,11 +92,7 @@ async def initialize_simulation():
 @router.post("/stop", tags=["World Simulation"])
 async def stop_simulation():
     """
-    Send a message to an entity. 
-    DIRECTIONS: Enter the integer of the entity you wish to message and execute. 
-    The response body reveals any entities within the messaging range of the entity you wish to message. 
-    Note the "id" of the entity and then use "Send Messsage" to send a message as the "id" of that entity so your chosen entity recieves the message. 
-    The sending entity will not have a memory of the message being sent.
+    Sends an iteration stop signal to prevent further iterations. After the current iteration is over it will not start a new one.
     """
     global stop_signal
     try:

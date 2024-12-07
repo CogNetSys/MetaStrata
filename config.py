@@ -1,6 +1,5 @@
 import os
 from dotenv import load_dotenv
-import logging
 from models import SimulationSettings, PromptSettings
 
 # Load environment variables
@@ -19,10 +18,10 @@ GRID_SIZE = 30
 NUM_ENTITIES = 10
 MAX_STEPS = 100
 CHEBYSHEV_DISTANCE = 5
-LLM_MODEL = "llama-3.1-8b-instant"
+LLM_MODEL = "llama-3.2-11b-vision-preview"
 LLM_MAX_TOKENS = 1024
 LLM_TEMPERATURE = 0.7
-REQUEST_DELAY = 1.5
+REQUEST_DELAY = 2.3
 MAX_CONCURRENT_REQUESTS = 1
 
 # Prompt Templates
@@ -40,16 +39,24 @@ Respond with only the summary, and nothing else.
 
 DEFAULT_MOVEMENT_GENERATION_PROMPT = """
 You are entity{entityId} at position ({x}, {y}). {grid_description} You have a summary memory of the situation so far: {memory}.
-Based on this, decide your next move. Respond with only one of the following options, and nothing else: "x+1", "x-1", "y+1", "y-1", or "stay".
+Based on this, decide your next move. Please choose one of the following options, and nothing else: "x+1", "x-1", "y+1", "y-1", or "stay".
 Do not provide any explanation or additional text.
 """
 
-# Logging Configuration
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("simulation_app")
+# Environment variables for logs
+LOG_DIR = os.getenv("LOG_DIR", "/var/log/myapp")  # Default directory if not specified
+LOG_FILE_NAME = os.getenv("LOG_FILE", "simulation_logs.log")  # Default log file name
 
-def add_log(message: str):
-    from datetime import datetime
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    formatted_message = f"[{timestamp}] {message}"
-    print(formatted_message)  # Log to console or store as needed
+# Combine the directory and file name
+LOG_FILE = os.path.join(LOG_DIR, LOG_FILE_NAME)
+
+# Log Queue Max Size (for the in-memory log queue)
+LOG_QUEUE_MAX_SIZE = int(os.getenv("LOG_QUEUE_MAX_SIZE", 100))  # Default to 100 if not set
+
+# Set Log Level from environment, defaulting to INFO if not set
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+# Import the necessary utilities only where needed, not at the top
+def get_logger_and_log_queue():
+    from utils import add_log, LOG_QUEUE, logger
+    return add_log, LOG_QUEUE, logger
