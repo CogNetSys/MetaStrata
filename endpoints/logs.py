@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException
 from logging.handlers import RotatingFileHandler
 from config import LOG_FILE, LOG_DIR, LOG_QUEUE_MAX_SIZE
 from utils import add_log, LOG_QUEUE
+from collections import deque
 
 router = APIRouter()
 

@@ -22,7 +22,7 @@ LLM_MODEL = "llama-3.2-11b-vision-preview"
 LLM_MAX_TOKENS = 1024
 LLM_TEMPERATURE = 0.7
 REQUEST_DELAY = 2.3
-MAX_CONCURRENT_REQUESTS = 1
+MAX_CONCURRENT_REQUESTS = 4
 
 # Prompt Templates
 GRID_DESCRIPTION = "The field size is 30 x 30 with periodic boundary conditions, and there are a total of 10 entities. You are free to move around the field and converse with other entities. Work collectively to solve problems."

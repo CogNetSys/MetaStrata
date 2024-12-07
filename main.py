@@ -265,6 +265,7 @@ async def custom_swagger_ui_html():
     html = get_swagger_ui_html(
         openapi_url=app.openapi_url,
         title="FastAPI - WebSocket Integration",
+        # swagger_css_url="https://cdn.jsdelivr.net/gh/Itz-fork/Fastapi-Swagger-UI-Dark/assets/swagger_ui_dark.min.css"
     )
 
     custom_script = '<script src="/static/js/websocket_client.js"></script>'
