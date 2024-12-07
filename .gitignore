@@ -12,6 +12,7 @@ MetaStrata-venv/
 
 # Others
 *.log
+/logs
 
 # Vercel
 .vercel
