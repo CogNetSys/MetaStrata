@@ -1,7 +1,8 @@
 Principle - Keep It Simple But Not One Step Too Simple
 
 ToDo
-- asdf
+- Batch Processing
+- Multiple Models
 
 ToDo - Level 1 Improvements.
 - Security, Safeguards, and Failsafe protocol.

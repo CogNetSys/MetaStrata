@@ -1,4 +1,5 @@
 from pydantic import BaseModel
+from typing import List
 
 class Entity(BaseModel):
     id: int
@@ -22,3 +23,10 @@ class PromptSettings(BaseModel):
     message_generation_prompt: str
     memory_generation_prompt: str
     movement_generation_prompt: str
+
+class BatchMessage(BaseModel):
+    entity_id: int
+    message: str
+
+class BatchMessagesPayload(BaseModel):
+    messages: List[BatchMessage]

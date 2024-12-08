@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from utils import add_log, LOG_QUEUE, logger
+from endpoints.database import redis, supabase
 from config import (
     GRID_SIZE,
     NUM_ENTITIES,
@@ -13,15 +14,6 @@ import asyncio
 
 # Initialize Router
 router = APIRouter()
-
-# Redis client
-redis = Redis(
-    host=REDIS_ENDPOINT,
-    port=6379,
-    password=REDIS_PASSWORD,
-    decode_responses=True,
-    ssl=True
-)
 
 # Stop signal for simulation control
 stop_signal = False

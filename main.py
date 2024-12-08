@@ -841,13 +841,6 @@ async def broadcast_message(message: str):
         add_log(error_message)
         raise HTTPException(status_code=500, detail=error_message)
 
-class BatchMessage(BaseModel):
-    entity_id: int
-    message: str
-
-class BatchMessagesPayload(BaseModel):
-    messages: List[BatchMessage]
-
 @app.delete("/entities/{entity_id}/messages", tags=["Entity Messaging"])
 async def clear_all_messages(entity_id: int):
     """
