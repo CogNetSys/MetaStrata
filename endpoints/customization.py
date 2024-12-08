@@ -10,6 +10,7 @@ from config import (
     DEFAULT_MESSAGE_GENERATION_PROMPT, DEFAULT_MEMORY_GENERATION_PROMPT, DEFAULT_MOVEMENT_GENERATION_PROMPT
 )
 
+
 # Define the models for settings and prompts
 class CustomRuleRequest(BaseModel):
     rule: str
