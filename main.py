@@ -227,23 +227,6 @@ async def fetch_nearby_messages(entity, entities, message_to_send=None):
 
     return received_messages
 
-async def send_llm_batch_requests(prompts: List[str]) -> List[dict]:
-    """
-    Send a batch of prompts to the LLM and return the responses.
-
-    Args:
-        prompts (List[str]): List of prompt strings to send.
-
-    Returns:
-        List[dict]: List of response dictionaries.
-    """
-    try:
-        results = await asyncio.gather(*[agent.run(prompt) for prompt in prompts])
-        return [result.data.dict() for result in results]
-    except Exception as e:
-        logger.error(f"Error during batched LLM request: {str(e)}")
-        return [{"error": str(e)} for _ in prompts]
-    
 # Lifespan Context Manager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -419,7 +402,7 @@ async def custom_swagger_ui_html():
 
 # Redis client initialization
 @app.on_event("startup")
-async def startup():
+def startup():
     try:
         # Check Redis connection synchronously
         redis.ping()
@@ -428,7 +411,7 @@ async def startup():
         logger.error(f"Error connecting to Redis: {str(e)}")
 
 @app.on_event("shutdown")
-async def shutdown():
+def shutdown():
     try:
         # Close Redis connection synchronously
         redis.close()
@@ -573,27 +556,17 @@ async def perform_steps(request: StepRequest):
                 break
 
             # Movement Generation
-            try:
-                # Collect prompts for all entities
-                movement_prompts = []
-                for entity in entities:
-                    movement_prompt = construct_prompt(
-                        prompts.get("movement_generation_prompt", DEFAULT_MOVEMENT_GENERATION_PROMPT),
-                        entity,
-                        []
+            for entity in entities:
+                try:
+                    movement_prompt = prompts.get("movement_generation_prompt", DEFAULT_MOVEMENT_GENERATION_PROMPT)
+                    movement_result = await send_llm_request(
+                        construct_prompt(movement_prompt, entity, [])
                     )
-                    movement_prompts.append(movement_prompt)
-
-                # Send the batch to the LLM
-                movement_responses = await send_llm_batch_requests(movement_prompts)
-
-                # Process LLM responses and update entities
-                for entity, response in zip(entities, movement_responses):
-                    if "movement" in response:
-                        movement = response["movement"].strip().lower()
+                    if "movement" in movement_result:
+                        movement = movement_result["movement"].strip().lower()
                         initial_position = (entity["x"], entity["y"])
 
-                        # Update the position logic
+                        # Apply movement logic
                         if movement == "x+1":
                             entity["x"] = (entity["x"] + 1) % GRID_SIZE
                         elif movement == "x-1":
@@ -604,20 +577,21 @@ async def perform_steps(request: StepRequest):
                             entity["y"] = (entity["y"] - 1) % GRID_SIZE
                         elif movement == "stay":
                             logger.info(f"Entity {entity['id']} stays in place at {initial_position}.")
+                            add_log(f"Entity {entity['id']} stays in place at {initial_position}.")
                             continue
                         else:
                             logger.warning(f"Invalid movement command for Entity {entity['id']}: {movement}")
+                            add_log(f"Invalid movement command for Entity {entity['id']}: {movement}")
                             continue
 
-                        # Log the movement
+                        # Log and update position
                         logger.info(f"Entity {entity['id']} moved from {initial_position} to ({entity['x']}, {entity['y']}) with action '{movement}'.")
-
-                        # Update Redis
-                        logger.debug(f"Updating Redis for Entity {entity['id']} with new position: ({entity['x']}, {entity['y']})")
+                        add_log(f"Entity {entity['id']} moved from {initial_position} to ({entity['x']}, {entity['y']}) with action '{movement}'.")
                         await redis.hset(f"entity:{entity['id']}", mapping={"x": entity["x"], "y": entity["y"]})
-                        logger.debug(f"Redis updated for Entity {entity['id']}")
-            except Exception as e:
-                logger.error(f"Error during batched movement generation: {str(e)}")
+                except Exception as e:
+                    logger.error(f"Error generating movement for Entity {entity['id']}: {str(e)}")
+                    add_log(f"Error generating movement for Entity {entity['id']}: {str(e)}")
+                await asyncio.sleep(REQUEST_DELAY)
 
         logger.info(f"Completed {request.steps} step(s).")
         add_log(f"Simulation steps completed: {request.steps} step(s).")
@@ -866,6 +840,13 @@ async def broadcast_message(message: str):
         error_message = f"Error broadcasting message: {str(e)}"
         add_log(error_message)
         raise HTTPException(status_code=500, detail=error_message)
+
+class BatchMessage(BaseModel):
+    entity_id: int
+    message: str
+
+class BatchMessagesPayload(BaseModel):
+    messages: List[BatchMessage]
 
 @app.delete("/entities/{entity_id}/messages", tags=["Entity Messaging"])
 async def clear_all_messages(entity_id: int):
