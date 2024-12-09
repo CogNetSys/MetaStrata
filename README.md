@@ -136,3 +136,64 @@ Updates
 - ~Nov.15th, 2024. Implemented Takata et al. barebones without the visualizations or analysis in JavaScript. Used Cloudflare worker to host the app, Supabase PostGres Database with Upstash Redis for cache, Groq cloud for the LLM. I watched a video on the "Discover AI" YouTube channel called, "AI Agents Create a New World - MBTI Personalities". It inspired me to immediately implement the idea for experimentation.
 
 
+BATCH PROCESSING BATCH PROCESSING
+
+
+YES! Perfect!
+- We need to generate unique prompts
+- Join them together to form a single batch prompt.
+- Ensure the proper response that includes the example:
+"Provide your final answer as a comma-separated list of actions, one per entity, in the same order as the prompts above."
+- I would prefer to include a system prompt, perhaps something Pydantic AI compliant.
+- I like this too: "# 'movement_result' should contain the 'movement' field with actions for each entity.
+# You will then parse these actions, validate them, and apply them to your entities as before."
+
+- Maintain order. Yes I agree.
+- Clear Instruction for LLM Responses. Yes. I agree. I prefer a system prompt sent to instruct it on how to process the payload.
+- Validation, definitely validate it too please.
+
+Do all of these edits, then respond with my entire script. Thank you so much.
+
+Below is an example of how you can assemble a batch of movement prompts for each entity using the `DEFAULT_MOVEMENT_GENERATION_PROMPT`. Each entity will have a unique prompt that includes its own memory, position, and the shared grid description. This approach leverages your existing `construct_prompt` function and `entities` list.
+
+### Key Points
+- We use `construct_prompt` to inject each entity’s unique parameters: `entityId`, `(x, y)` position, `memory`, and the shared `grid_description`.
+- Since `construct_prompt` replaces placeholders with entity-specific details, each entity's final prompt is customized based on their current state and memory.
+- After generating individual prompts, we join them together to form a single batch prompt. The LLM can then process all entities at once.
+- Ensure the LLM understands that it should return a comma-separated list of responses—one per entity—in the order presented. You may need to add an instruction at the end of the batch prompt telling the LLM to respond in a corresponding comma-separated format, if desired.
+
+### Example Code Snippet
+
+```python
+# Assuming 'construct_prompt', 'entities', and 'DEFAULT_MOVEMENT_GENERATION_PROMPT' are already defined
+
+# Generate individual movement prompts for each entity
+movement_prompts = [
+    construct_prompt(DEFAULT_MOVEMENT_GENERATION_PROMPT, entity, [])
+    for entity in entities
+]
+
+# Each entry in 'movement_prompts' is now a fully formed prompt with the entity's memory, position, etc.
+# Combine all entity prompts into one batch prompt
+batch_prompt = "\n\n".join(movement_prompts)
+
+# (Optional) Add instructions for how the LLM should return the responses.
+# For example, you could append something like:
+# "Provide your final answer as a comma-separated list of actions, one per entity, in the same order as the prompts above."
+
+# Send this 'batch_prompt' to your LLM
+movement_result = await send_llm_request(batch_prompt)
+
+# 'movement_result' should contain the 'movement' field with actions for each entity.
+# You will then parse these actions, validate them, and apply them to your entities as before.
+```
+
+### Additional Tips
+1. **Maintain Order:** The order of prompts in `movement_prompts` should match the order of entities. This makes it easier to correlate each returned action with the correct entity.
+2. **Clear Instructions for LLM Response:** If you want the LLM to produce a single combined response for all entities, consider updating the prompt (e.g., at the end of `batch_prompt`) to say something like:
+    ```
+    After reading all the entities' situations, respond with their chosen actions in a single line, separated by commas, in the order of the entities presented above. Provide no explanations or extra text, just the actions.
+    ```
+3. **Validation:** After receiving the LLM response, split it by commas, trim spaces, and validate each action against the expected movement set (`{"x+1", "x-1", "y+1", "y-1", "stay"}`).
+
+By following this approach, each entity's movement prompt is generated uniquely based on its memory and state, and all prompts are assembled into one final batch prompt for the LLM to process collectively.

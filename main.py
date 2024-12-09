@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, WebSocket, File, UploadFile, APIRouter, Query
 from fastapi.responses import JSONResponse, HTMLResponse, FileResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.openapi.docs import get_swagger_ui_html
 from pydantic import BaseModel, Field
@@ -25,7 +26,6 @@ from dotenv import load_dotenv
 from redis.asyncio import Redis
 from supabase import create_client, Client
 from asyncio import Semaphore
-from contextlib import asynccontextmanager
 from collections import deque
 from datetime import datetime
 from endpoints import router
@@ -50,7 +50,9 @@ from config import (
     DEFAULT_MESSAGE_GENERATION_PROMPT,
     DEFAULT_MEMORY_GENERATION_PROMPT,
     DEFAULT_MOVEMENT_GENERATION_PROMPT,
-    LOG_FILE
+    LOG_FILE,
+    LOG_QUEUE_MAX_SIZE,
+    LOG_LEVEL
 )
 
 load_dotenv()
@@ -100,7 +102,7 @@ class StepRequest(BaseModel):
     steps: int
 
 # Logging Configuration
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
 logger = logging.getLogger("simulation_app")
 
 # Use the dynamic log file path
@@ -143,11 +145,15 @@ def construct_prompt(template, entity, messages):
 # Helper function to fetch Prompts from FastAPI
 async def fetch_prompts_from_fastapi():
     async with httpx.AsyncClient() as client:
-        response = await client.get("http://localhost:8000/prompts")
-        if response.status_code == 200:
-            return response.json()  # Return the fetched prompts
-        else:
-            logger.warning("Failed to fetch prompts, using default ones.")
+        try:
+            response = await client.get("http://localhost:8000/customization/prompts")
+            if response.status_code == 200:
+                return response.json()  # Return the fetched prompts
+            else:
+                logger.warning("Failed to fetch prompts, using default ones.")
+                return {}  # Return an empty dict to trigger the default prompts
+        except Exception as e:
+            logger.error(f"Error fetching prompts from FastAPI: {e}")
             return {}  # Return an empty dict to trigger the default prompts
 
 # Helper Function to add logs to the queue
@@ -155,6 +161,8 @@ def add_log(message: str):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     formatted_message = f"[{timestamp}] {message}"
     LOG_QUEUE.append(formatted_message)
+    if len(LOG_QUEUE) > LOG_QUEUE_MAX_SIZE:
+        LOG_QUEUE.popleft()  # Maintain the queue size
     logger.info(formatted_message)  # Log to the standard logger as well
 
 async def send_llm_request(prompt):
@@ -201,7 +209,7 @@ async def intialize_entities():
         entity_key = f"entity:{entity['id']}"
         await redis.hset(entity_key, mapping=entity)
         await redis.lpush("entity_keys", entity_key)  # Add to entity_keys list
-        await redis.delete(f"{entity['id']}:messages")  # Clear message queue
+        await redis.delete(f"entity:{entity['id']}:messages")  # Clear message queue
 
     logger.info("Entities initialized.")
     return entities
@@ -234,14 +242,15 @@ async def lifespan(app: FastAPI):
     logger.info("Starting application lifespan...")
     try:
         # Startup logic
-        redis.ping()  # Synchronous, no need for await
+        await redis.ping()  # Asynchronous ping
         logger.info("Redis connection established.")
         yield  # Application is running
+        entities = await intialize_entities()
     finally:
         # Shutdown logic
         logger.info("Shutting down application...")
         stop_signal = True  # Ensure simulation stops if running
-        redis.close()  # Synchronous, no need for await
+        await redis.close()  # Asynchronous close
         logger.info("Redis connection closed.")
 
 # Create FastAPI app with lifespan
@@ -350,7 +359,6 @@ async def custom_swagger_ui_html():
                     });
                 }
 
-                document.addEventListener("DOMContentLoaded", function () {
                 // Get all buttons inside the controls section
                 const buttons = document.querySelectorAll("#websocket-controls button");
 
@@ -392,32 +400,14 @@ async def custom_swagger_ui_html():
                     });
                 });
             });
-
-            });
         </script>
     '''
     modified_html = html.body.decode("utf-8").replace("</body>", f"{custom_script}{log_area}</body>")
-    
+
     return HTMLResponse(modified_html)
 
-# Redis client initialization
-@app.on_event("startup")
-def startup():
-    try:
-        # Check Redis connection synchronously
-        redis.ping()
-        logger.info("Connected to Redis")
-    except Exception as e:
-        logger.error(f"Error connecting to Redis: {str(e)}")
-
-@app.on_event("shutdown")
-def shutdown():
-    try:
-        # Close Redis connection synchronously
-        redis.close()
-        logger.info("Closed Redis connection")
-    except Exception as e:
-        logger.error(f"Error closing Redis: {str(e)}")
+# Redis client initialization is handled via lifespan context manager
+# Remove redundant startup and shutdown event handlers to prevent conflicts
 
 @app.exception_handler(HTTPException)
 async def custom_http_exception_handler(request, exc):
@@ -436,6 +426,14 @@ async def global_exception_handler(request, exc):
         content={"message": "An unexpected error occurred. Please try again later."}
     )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Adjust this to your allowed origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 @app.post("/step", tags=["World Simulation"])
 async def perform_steps(request: StepRequest):
     global stop_signal
@@ -443,7 +441,7 @@ async def perform_steps(request: StepRequest):
 
     try:
         add_log(f"Simulation steps requested: {request.steps} step(s).")
-        
+
         # Fetch the current prompt templates from FastAPI
         prompts = await fetch_prompts_from_fastapi()
         add_log("Fetched prompt templates successfully.")
@@ -474,17 +472,22 @@ async def perform_steps(request: StepRequest):
                     add_log(f"Skipping invalid key {key} of type {key_type}")
 
             # Fetch entity data from Redis for all valid keys
-            entities = [
-                {
-                    "id": int(entity_data["id"]),
-                    "name": entity_data["name"],
-                    "x": int(entity_data["x"]),
-                    "y": int(entity_data["y"]),
-                    "memory": entity_data.get("memory", "")
-                }
-                for entity_data in await asyncio.gather(*[redis.hgetall(key) for key in valid_entity_keys])
-                if entity_data  # Ensure we only include valid entity data
-            ]
+            entities_data = await asyncio.gather(*[redis.hgetall(key) for key in valid_entity_keys])
+            entities = []
+            for entity_data in entities_data:
+                if entity_data:
+                    # Convert bytes to strings if necessary
+                    if isinstance(entity_data, dict):
+                        entity = {
+                            "id": int(entity_data.get("id", 0)),
+                            "name": entity_data.get("name", ""),
+                            "x": int(entity_data.get("x", 0)),
+                            "y": int(entity_data.get("y", 0)),
+                            "memory": entity_data.get("memory", "")
+                        }
+                        entities.append(entity)
+                    else:
+                        add_log(f"Invalid entity data: {entity_data}")
 
             logger.info(f"Processing {len(entities)} entities.")
             add_log(f"Processing {len(entities)} entities for step {step + 1}.")
@@ -521,7 +524,7 @@ async def perform_steps(request: StepRequest):
                     message_result = await send_llm_request(
                         construct_prompt(message_prompt, entity, messages)
                     )
-                    if "message" in message_result:
+                    if "message" in message_result and message_result["message"]:
                         await redis.hset(f"entity:{entity['id']}", "message", message_result["message"])
                         add_log(f"Message generated for Entity {entity['id']}: {message_result['message']}")
                 except Exception as e:
@@ -542,7 +545,7 @@ async def perform_steps(request: StepRequest):
                     memory_result = await send_llm_request(
                         construct_prompt(memory_prompt, entity, messages)
                     )
-                    if "memory" in memory_result:
+                    if "memory" in memory_result and memory_result["memory"]:
                         await redis.hset(f"entity:{entity['id']}", "memory", memory_result["memory"])
                         add_log(f"Memory updated for Entity {entity['id']}: {memory_result['memory']}")
                 except Exception as e:
@@ -555,43 +558,84 @@ async def perform_steps(request: StepRequest):
                 add_log("Simulation steps halted after memory generation by stop signal.")
                 break
 
-            # Movement Generation
-            for entity in entities:
-                try:
-                    movement_prompt = prompts.get("movement_generation_prompt", DEFAULT_MOVEMENT_GENERATION_PROMPT)
-                    movement_result = await send_llm_request(
-                        construct_prompt(movement_prompt, entity, [])
-                    )
-                    if "movement" in movement_result:
-                        movement = movement_result["movement"].strip().lower()
-                        initial_position = (entity["x"], entity["y"])
+            # Movement Generation (Batch Processing)
+            try:
+                movement_prompt_template = prompts.get("movement_generation_prompt", DEFAULT_MOVEMENT_GENERATION_PROMPT)
 
-                        # Apply movement logic
-                        if movement == "x+1":
-                            entity["x"] = (entity["x"] + 1) % GRID_SIZE
-                        elif movement == "x-1":
-                            entity["x"] = (entity["x"] - 1) % GRID_SIZE
-                        elif movement == "y+1":
-                            entity["y"] = (entity["y"] + 1) % GRID_SIZE
-                        elif movement == "y-1":
-                            entity["y"] = (entity["y"] - 1) % GRID_SIZE
-                        elif movement == "stay":
-                            logger.info(f"Entity {entity['id']} stays in place at {initial_position}.")
-                            add_log(f"Entity {entity['id']} stays in place at {initial_position}.")
-                            continue
-                        else:
-                            logger.warning(f"Invalid movement command for Entity {entity['id']}: {movement}")
-                            add_log(f"Invalid movement command for Entity {entity['id']}: {movement}")
-                            continue
+                # Generate movement prompts dynamically for each entity
+                movement_prompts = [
+                    construct_prompt(DEFAULT_MOVEMENT_GENERATION_PROMPT, entity, [])
+                    for entity in entities
+                ]
 
-                        # Log and update position
-                        logger.info(f"Entity {entity['id']} moved from {initial_position} to ({entity['x']}, {entity['y']}) with action '{movement}'.")
-                        add_log(f"Entity {entity['id']} moved from {initial_position} to ({entity['x']}, {entity['y']}) with action '{movement}'.")
-                        await redis.hset(f"entity:{entity['id']}", mapping={"x": entity["x"], "y": entity["y"]})
-                except Exception as e:
-                    logger.error(f"Error generating movement for Entity {entity['id']}: {str(e)}")
-                    add_log(f"Error generating movement for Entity {entity['id']}: {str(e)}")
-                await asyncio.sleep(REQUEST_DELAY)
+                # Combine individual prompts into a single batch prompt
+                batch_prompt = "\n\n".join(movement_prompts)
+
+                # Add system prompt at the beginning
+                system_prompt = """
+                You are an AI assistant helping multiple entities decide their next moves based on their individual states.
+                Please respond with a comma-separated list of actions corresponding to each entity in the order they were presented.
+                Each action should be one of the following: "x+1", "x-1", "y+1", "y-1", or "stay".
+                Provide no additional text or explanations.
+                """
+                full_prompt = system_prompt.strip() + "\n\n" + batch_prompt
+
+                add_log("Sending batch movement prompt to LLM.")
+                movement_result = await send_llm_request(full_prompt)
+
+                # Log the raw LLM movement response
+                logger.debug(f"Raw LLM movement response: {movement_result}")
+                add_log(f"Raw LLM movement response: {movement_result}")
+
+                movement_response = movement_result.get("movement", "")
+                movement_list = [m.strip() for m in movement_response.split(",")]
+
+                if len(movement_list) != len(entities):
+                    logger.warning(f"Expected {len(entities)} movement actions, but received {len(movement_list)}.")
+                    add_log(f"Mismatch in movement actions: expected {len(entities)}, got {len(movement_list)}.")
+                    # Trim extra actions or add "stay" for missing ones
+                    if len(movement_list) > len(entities):
+                        movement_list = movement_list[:len(entities)]
+                    else:
+                        movement_list += ["stay"] * (len(entities) - len(movement_list))
+
+                # Validate movements and set invalid ones to "stay"
+                valid_movements = {"x+1", "x-1", "y+1", "y-1", "stay"}
+                movement_list = [
+                    movement if movement in valid_movements else "stay"
+                    for movement in movement_list
+                ]
+
+                for entity, movement in zip(entities, movement_list):
+                    initial_position = (entity["x"], entity["y"])
+
+                    # Apply movement logic
+                    if movement == "x+1":
+                        entity["x"] = (entity["x"] + 1) % GRID_SIZE
+                    elif movement == "x-1":
+                        entity["x"] = (entity["x"] - 1) % GRID_SIZE
+                    elif movement == "y+1":
+                        entity["y"] = (entity["y"] + 1) % GRID_SIZE
+                    elif movement == "y-1":
+                        entity["y"] = (entity["y"] - 1) % GRID_SIZE
+                    elif movement == "stay":
+                        logger.info(f"Entity {entity['id']} stays in place at {initial_position}.")
+                        add_log(f"Entity {entity['id']} stays in place at {initial_position}.")
+                        continue
+                    else:
+                        logger.warning(f"Invalid movement command for Entity {entity['id']}: {movement}")
+                        add_log(f"Invalid movement command for Entity {entity['id']}: {movement}")
+                        continue
+
+                    # Log and update position
+                    logger.info(f"Entity {entity['id']} moved from {initial_position} to ({entity['x']}, {entity['y']}) with action '{movement}'.")
+                    add_log(f"Entity {entity['id']} moved from {initial_position} to ({entity['x']}, {entity['y']}) with action '{movement}'.")
+                    await redis.hset(f"entity:{entity['id']}", mapping={"x": entity["x"], "y": entity["y"]})
+
+            except Exception as e:
+                logger.error(f"Error during batch movement generation: {str(e)}")
+                add_log(f"Error during batch movement generation: {str(e)}")
+            await asyncio.sleep(REQUEST_DELAY)
 
         logger.info(f"Completed {request.steps} step(s).")
         add_log(f"Simulation steps completed: {request.steps} step(s).")
@@ -601,7 +645,7 @@ async def perform_steps(request: StepRequest):
         logger.error(f"Unexpected error during simulation steps: {str(e)}")
         add_log(f"Unexpected error during simulation steps: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An error occurred during simulation steps: {str(e)}")
-    
+
 @app.get("/entities/{entity_id}/messages", response_model=Optional[str], tags=["Entity Messaging"])
 async def retrieve_message(entity_id: int):
     """
@@ -627,7 +671,7 @@ async def retrieve_message(entity_id: int):
         error_message = f"Error retrieving message for Entity {entity_id}: {str(e)}"
         add_log(error_message)
         raise HTTPException(status_code=500, detail=error_message)
-   
+    
 @app.post("/entities/{recipient_id}/create_memory", tags=["Entity Messaging"])
 async def create_memory(
     recipient_id: int,
@@ -635,7 +679,7 @@ async def create_memory(
 ):
     """
     Create a memory for an entity. 
-    DIRECTIONS: Append a memory to thier existing memory field. 
+    DIRECTIONS: Append a memory to their existing memory field. 
     Enter the integer of the Entity you wish to add a memory to and the memory content to add for the recipient entity.
     """
     recipient_key = f"entity:{recipient_id}"
@@ -718,10 +762,10 @@ async def send_message(
 @app.get("/entities/{entity_id}/nearby", response_model=List[Entity], tags=["Entity Messaging"])
 async def get_nearby_entities(entity_id: int):
     """
-    Send a message to an entity. 
+    Get entities within the messaging range of a specific entity.
     DIRECTIONS: Enter the integer of the entity you wish to message and execute. 
     The response body reveals any entities within the messaging range of the entity you wish to message. 
-    Note the "id" of the entity and then use "Send Messsage" to send a message as the "id" of that entity so your chosen entity recieves the message. 
+    Note the "id" of the entity and then use "Send Message" to send a message as the "id" of that entity so your chosen entity receives the message. 
     The sending entity will not have a memory of the message being sent.
     """
     try:
@@ -738,10 +782,13 @@ async def get_nearby_entities(entity_id: int):
         entity = Entity(**entity_data)
 
         # Fetch all entities except the current one
-        all_entities = [
-            Entity(**await redis.hgetall(f"entity:{i}"))
-            for i in range(NUM_ENTITIES) if i != entity_id
-        ]
+        all_entities_data = await asyncio.gather(*[
+            redis.hgetall(f"entity:{i}") for i in range(NUM_ENTITIES) if i != entity_id
+        ])
+        all_entities = []
+        for data in all_entities_data:
+            if data:
+                all_entities.append(Entity(**data))
 
         # Filter nearby entities based on Chebyshev distance
         nearby_entities = [
@@ -830,7 +877,7 @@ async def broadcast_message(message: str):
         # Broadcast the message to all entities
         for key in entity_keys:
             entity_id = key.split(":")[1]  # Extract entity ID
-            message_key = f"{entity_id}:messages"
+            message_key = f"entity:{entity_id}:messages"
             await redis.lpush(message_key, message)
 
         # Log the broadcast action
@@ -841,20 +888,13 @@ async def broadcast_message(message: str):
         add_log(error_message)
         raise HTTPException(status_code=500, detail=error_message)
 
-class BatchMessage(BaseModel):
-    entity_id: int
-    message: str
-
-class BatchMessagesPayload(BaseModel):
-    messages: List[BatchMessage]
-
 @app.delete("/entities/{entity_id}/messages", tags=["Entity Messaging"])
 async def clear_all_messages(entity_id: int):
     """
     Remove all messages for a specific entity.
     """
     try:
-        message_key = f"{entity_id}:messages"
+        message_key = f"entity:{entity_id}:messages"
 
         # Validate that the message key exists
         if not await redis.exists(message_key):

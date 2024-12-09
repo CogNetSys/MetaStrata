@@ -1,7 +1,9 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
+from typing import Optional, List
 from utils import add_log, LOG_QUEUE, logger
+from models import PromptSettings
 from config import (
     SimulationSettings, PromptSettings,
     GRID_SIZE, NUM_ENTITIES, MAX_STEPS, CHEBYSHEV_DISTANCE,
@@ -14,6 +16,11 @@ from config import (
 # Define the models for settings and prompts
 class CustomRuleRequest(BaseModel):
     rule: str
+
+# Plugin management models
+class PluginActionRequest(BaseModel):
+    plugin_name: Optional[str] = None
+    action: str
 
 # A list to store custom rules and installed plugins
 custom_rules = []
@@ -404,16 +411,19 @@ async def set_settings(settings: SimulationSettings):
         add_log(f"Error updating simulation settings: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+## Prompt Templates Endpoints
 
-### Prompt Templates
 @router.get("/prompts", response_model=PromptSettings, tags=["Customization"])
 async def get_prompts():
+    """
+    Fetch the current prompt templates.
+    """
     try:
         add_log("Fetching current prompt templates.")
         return PromptSettings(
-            message_generation_prompt=DEFAULT_MESSAGE_GENERATION_PROMPT,
-            memory_generation_prompt=DEFAULT_MEMORY_GENERATION_PROMPT,
-            movement_generation_prompt=DEFAULT_MOVEMENT_GENERATION_PROMPT
+            message_generation_prompt=DEFAULT_MESSAGE_GENERATION_PROMPT.strip(),
+            memory_generation_prompt=DEFAULT_MEMORY_GENERATION_PROMPT.strip(),
+            movement_generation_prompt=DEFAULT_MOVEMENT_GENERATION_PROMPT.strip()
         )
     except Exception as e:
         add_log(f"Error fetching prompt templates: {str(e)}")
@@ -421,6 +431,9 @@ async def get_prompts():
 
 @router.post("/prompts", response_model=PromptSettings, tags=["Customization"])
 async def set_prompts(prompts: PromptSettings):
+    """
+    Update the prompt templates.
+    """
     try:
         add_log("Updating prompt templates.")
         global DEFAULT_MESSAGE_GENERATION_PROMPT, DEFAULT_MEMORY_GENERATION_PROMPT, DEFAULT_MOVEMENT_GENERATION_PROMPT
@@ -428,8 +441,8 @@ async def set_prompts(prompts: PromptSettings):
         DEFAULT_MESSAGE_GENERATION_PROMPT = prompts.message_generation_prompt
         DEFAULT_MEMORY_GENERATION_PROMPT = prompts.memory_generation_prompt
         DEFAULT_MOVEMENT_GENERATION_PROMPT = prompts.movement_generation_prompt
+        add_log(f"Prompt templates updated: {prompts.dict()}")
         return prompts
     except Exception as e:
         add_log(f"Error updating prompt templates: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
