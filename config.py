@@ -1,6 +1,7 @@
 import os
 from dotenv import load_dotenv
-from models import SimulationSettings, PromptSettings
+from models import SimulationSettings, PromptSettings, World
+from typing import List, Dict
 
 # Load environment variables
 load_dotenv()
@@ -14,8 +15,9 @@ REDIS_ENDPOINT = "cute-crawdad-25113.upstash.io"
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
 
 # Simulation Configuration
+NUM_WORLDS = 1
 GRID_SIZE = 30
-NUM_ENTITIES = 6
+NUM_ENTITIES = 10
 MAX_STEPS = 100
 CHEBYSHEV_DISTANCE = 5
 LLM_MODEL = "llama-3.3-70b-versatile"
@@ -43,6 +45,13 @@ Based on this, decide your next move. Please choose one of the following options
 Respond with a single action corresponding to your next move. No extra text.
 """
 
+# Number of Worlds
+NUM_WORLDS = int(os.getenv("NUM_WORLDS", 1))  # Default to 1 if not set
+
+# mTNN API Endpoint
+#MTNN_API_ENDPOINT = os.getenv("MTNN_API_ENDPOINT")
+MTNN_API_ENDPOINT = "http://localhost:8000/mtnn/submit_summary"
+
 # Environment variables for logs
 LOG_DIR = os.getenv("LOG_DIR", "/var/log/myapp")  # Default directory if not specified
 LOG_FILE_NAME = os.getenv("LOG_FILE", "simulation_logs.log")  # Default log file name
@@ -60,3 +69,15 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 def get_logger_and_log_queue():
     from utils import add_log, LOG_QUEUE, logger
     return add_log, LOG_QUEUE, logger
+
+def create_world_config(world_id: int, grid_size: int, num_agents: int, tasks: list, resources: dict) -> dict:
+    """
+    Create a configuration dictionary for initializing a world.
+    """
+    return {
+        "world_id": world_id,
+        "grid_size": grid_size,
+        "num_agents": num_agents,
+        "tasks": tasks,  # Include tasks
+        "resources": resources  # Include resources
+    }

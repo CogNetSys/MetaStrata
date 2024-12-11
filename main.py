@@ -13,9 +13,9 @@ import traceback
 import tracemalloc
 from pydantic_ai.models.groq import GroqModel, GroqModelName
 from endpoints.database import redis, supabase
-from utils import add_log, LOG_QUEUE, logger
+from utils import add_log, LOG_QUEUE, logger, submit_summary
 from contextlib import asynccontextmanager
-from typing import List, Optional
+from typing import Dict, List, Optional
 from fastapi import FastAPI, HTTPException, WebSocket, File, UploadFile, APIRouter, Query
 from fastapi.responses import JSONResponse, HTMLResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,6 +30,7 @@ from collections import deque
 from datetime import datetime
 from endpoints import router
 from pydantic_ai import Agent
+from world import World
 from config import (
     SUPABASE_URL,
     SUPABASE_KEY,
@@ -52,7 +53,10 @@ from config import (
     DEFAULT_MOVEMENT_GENERATION_PROMPT,
     LOG_FILE,
     LOG_QUEUE_MAX_SIZE,
-    LOG_LEVEL
+    LOG_LEVEL,
+    MTNN_API_ENDPOINT,
+    NUM_WORLDS,
+    create_world_config
 )
 
 load_dotenv()
@@ -165,6 +169,43 @@ def add_log(message: str):
         LOG_QUEUE.popleft()  # Maintain the queue size
     logger.info(formatted_message)  # Log to the standard logger as well
 
+# Helper function for WOrlds. Randomly selects a movement action for an agent.
+def determine_agent_movement(agent: Dict) -> Dict:
+    """
+    Determine the movement for an agent.
+    """
+    # Example: Random movement
+    movement_options = [
+        {"x": 1, "y": 0},  # x+1
+        {"x": -1, "y": 0},  # x-1
+        {"x": 0, "y": 1},  # y+1
+        {"x": 0, "y": -1},  # y-1
+        {"x": 0, "y": 0}   # stay
+    ]
+    movement = random.choice(movement_options)
+    return movement
+
+# Helper function for WOrlds. Randomly generates messages between agents with a certain probability.
+def generate_communications(world: World) -> List[Dict]:
+    """
+    Generate communications between agents.
+    """
+    messages = []
+    for agent in world.agents:
+        if random.random() < 0.1:  # 10% chance to send a message
+            recipient = random.choice(world.agents)
+            if recipient["id"] != agent["id"]:
+                message = {
+                    "sender_id": agent["id"],
+                    "recipient_id": recipient["id"],
+                    "content": f"Hello from Agent {agent['id']}!"
+                }
+                messages.append(message)
+                # Log the communication
+                add_log(f"Agent {agent['id']} sent message to Agent {recipient['id']}.")
+    return messages
+
+
 async def send_llm_request(prompt):
     global stop_signal
     async with global_request_semaphore:
@@ -235,17 +276,136 @@ async def fetch_nearby_messages(entity, entities, message_to_send=None):
 
     return received_messages
 
+#World Simulation Functions
+
+async def simulate_world_step(world: World):
+    """
+    Update the state of the world for one simulation step.
+    This includes updating agents, tasks, resources, and handling communications.
+    """
+    try:
+        # Example: Update agent positions
+        for agent in world.agents:
+            move = determine_agent_movement(agent)  # Implement this function
+            agent["x"] = (agent["x"] + move["x"]) % world.grid_size
+            agent["y"] = (agent["y"] + move["y"]) % world.grid_size
+
+        # Example: Update tasks
+        for task in world.tasks:
+            task["progress"] += task.get("increment", 0.1)
+            task["progress"] = min(task["progress"], 1.0)  # Cap at 100%
+
+        # Example: Update resources
+        consumed = world.resources.get("consumed", 0) + 1  # Increment consumption
+        world.resources["consumed"] = consumed
+
+        # Example: Handle communications
+        messages = generate_communications(world)  # Implement this function
+        world.communications.extend(messages)
+
+        logger.debug(f"World {world.world_id} state updated.")
+    except Exception as e:
+        logger.error(f"Error simulating world {world.world_id} step: {e}")
+        add_log(f"Error simulating world {world.world_id} step: {e}")
+
+async def submit_summary(world_id: int, summary_vector: List[float]):
+    """
+    Send the summary vector to the mTNN for higher-level processing.
+    Implement the communication with the mTNN here.
+    """
+    try:
+        # Example: Send via HTTP POST
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                MTNN_API_ENDPOINT,  # Define this in your config
+                json={"world_id": world_id, "summary": summary_vector}
+            )
+            if response.status_code == 200:
+                logger.info(f"Successfully sent summary for World {world_id} to mTNN.")
+            else:
+                logger.warning(f"Failed to send summary for World {world_id} to mTNN. Status code: {response.status_code}")
+    except Exception as e:
+        logger.error(f"Error sending summary for World {world_id} to mTNN: {e}")
+        add_log(f"Error sending summary for World {world_id} to mTNN: {e}")
+
+async def fetch_tasks_for_world(world_id: int) -> List[Dict]:
+    """
+    Fetch or initialize tasks for the given world.
+    """
+    # Placeholder implementation
+    tasks = []
+    for i in range(100):  # Example: 100 tasks
+        task = {
+            "id": i,
+            "progress": 0.0,
+            "duration": np.random.randint(1, 10),
+            "increment": 0.1  # Progress increment per step
+        }
+        tasks.append(task)
+    logger.info(f"Fetched {len(tasks)} tasks for World {world_id}.")
+    return tasks
+
+async def fetch_resources_for_world(world_id: int) -> Dict:
+    """
+    Fetch or initialize resources for the given world.
+    """
+    # Placeholder implementation
+    resources = {
+        "total": 1000,
+        "consumed": 0,
+        "distribution": {agent_id: 100 for agent_id in range(NUM_ENTITIES)}
+    }
+    logger.info(f"Fetched resources for World {world_id}.")
+    return resources
+
 # Lifespan Context Manager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global stop_signal
     logger.info("Starting application lifespan...")
+    app.state.worlds = []
     try:
         # Startup logic
         await redis.ping()  # Asynchronous ping
         logger.info("Redis connection established.")
-        yield  # Application is running
-        entities = await intialize_entities()
+        # entities = await intialize_entities()
+
+        for world_id in range(NUM_WORLDS):
+            # Initialize tasks for the world
+            tasks = [
+                {
+                    "id": i,
+                    "progress": 0.0,
+                    "duration": random.randint(5, 20),
+                    "increment": 0.1
+                }
+                for i in range(100)  # Assuming 100 tasks per world
+            ]
+
+            # Initialize resources for the world
+            resources = {
+                "total": 1000,
+                "consumed": 0,
+                "distribution": {agent_id: 100 for agent_id in range(NUM_ENTITIES)}
+            }
+
+            # Create the world configuration
+            world_config = create_world_config(
+                world_id=world_id,
+                grid_size=GRID_SIZE,
+                num_agents=NUM_ENTITIES,
+                tasks=tasks,  # Pass initialized tasks
+                resources=resources  # Pass initialized resources
+            )
+
+            logger.debug(f"World Config: {world_config}")  # Log the world_config to inspect
+
+            # Create and append the world object
+            world = World(**world_config)  # Ensure the World class matches the configuration structure
+            app.state.worlds.append(world)
+            logger.info(f"World {world.world_id} initialized with {world.num_agents} agents.")
+        yield
+
     finally:
         # Shutdown logic
         logger.info("Shutting down application...")
@@ -453,6 +613,15 @@ async def perform_steps(request: StepRequest):
                 add_log("Simulation steps halted by stop signal.")
                 break
 
+            # Perform simulation logic for the world
+            for world in app.state.worlds:
+                await simulate_world_step(world)
+
+                summary_vector = world.summarize_state()
+                await submit_summary(world.world_id, summary_vector)
+
+                add_log(f"World {world.world_id} summary: {summary_vector}")
+
             # Fetch all entity keys dynamically from Redis
             entity_keys = await redis.keys("entity:*")  # Match all entity keys
             if not entity_keys:
@@ -558,83 +727,54 @@ async def perform_steps(request: StepRequest):
                 add_log("Simulation steps halted after memory generation by stop signal.")
                 break
 
-            # Movement Generation (Batch Processing)
+        # Generate Movement (Per-Entity Processing)
+        for entity in entities:
             try:
-                movement_prompt_template = prompts.get("movement_generation_prompt", DEFAULT_MOVEMENT_GENERATION_PROMPT)
+                # Construct the movement prompt for the current entity
+                movement_prompt = construct_prompt(
+                    prompts.get("movement_generation_prompt", DEFAULT_MOVEMENT_GENERATION_PROMPT),
+                    entity,
+                    []
+                )
 
-                # Generate movement prompts dynamically for each entity
-                movement_prompts = [
-                    construct_prompt(DEFAULT_MOVEMENT_GENERATION_PROMPT, entity, [])
-                    for entity in entities
-                ]
+                # Send the prompt to the LLM for generating movement
+                movement_result = await send_llm_request(movement_prompt)
+                movement = movement_result.get("movement", "stay").strip()
 
-                # Combine individual prompts into a single batch prompt
-                batch_prompt = "\n\n".join(movement_prompts)
-
-                # Add system prompt at the beginning
-                system_prompt = """
-                You are an AI assistant helping multiple entities decide their next moves based on their individual states.
-                Please respond with a comma-separated list of actions corresponding to each entity in the order they were presented.
-                Each action should be one of the following: "x+1", "x-1", "y+1", "y-1", or "stay".
-                Provide no additional text or explanations.
-                """
-                full_prompt = system_prompt.strip() + "\n\n" + batch_prompt
-
-                add_log("Sending batch movement prompt to LLM.")
-                movement_result = await send_llm_request(full_prompt)
-
-                # Log the raw LLM movement response
-                logger.debug(f"Raw LLM movement response: {movement_result}")
-                add_log(f"Raw LLM movement response: {movement_result}")
-
-                movement_response = movement_result.get("movement", "")
-                movement_list = [m.strip() for m in movement_response.split(",")]
-
-                if len(movement_list) != len(entities):
-                    logger.warning(f"Expected {len(entities)} movement actions, but received {len(movement_list)}.")
-                    add_log(f"Mismatch in movement actions: expected {len(entities)}, got {len(movement_list)}.")
-                    # Trim extra actions or add "stay" for missing ones
-                    if len(movement_list) > len(entities):
-                        movement_list = movement_list[:len(entities)]
-                    else:
-                        movement_list += ["stay"] * (len(entities) - len(movement_list))
-
-                # Validate movements and set invalid ones to "stay"
+                # Validate the movement response
                 valid_movements = {"x+1", "x-1", "y+1", "y-1", "stay"}
-                movement_list = [
-                    movement if movement in valid_movements else "stay"
-                    for movement in movement_list
-                ]
+                if movement not in valid_movements:
+                    movement = "stay"  # Default to "stay" if the response is invalid
 
-                for entity, movement in zip(entities, movement_list):
-                    initial_position = (entity["x"], entity["y"])
+                # Apply the movement to the entity
+                initial_position = (entity["x"], entity["y"])
+                if movement == "x+1":
+                    entity["x"] = (entity["x"] + 1) % GRID_SIZE
+                elif movement == "x-1":
+                    entity["x"] = (entity["x"] - 1) % GRID_SIZE
+                elif movement == "y+1":
+                    entity["y"] = (entity["y"] + 1) % GRID_SIZE
+                elif movement == "y-1":
+                    entity["y"] = (entity["y"] - 1) % GRID_SIZE
+                elif movement == "stay":
+                    logger.info(f"Entity {entity['id']} stays in place at {initial_position}.")
+                    add_log(f"Entity {entity['id']} stays in place at {initial_position}.")
+                    continue
+                else:
+                    logger.warning(f"Invalid movement command for Entity {entity['id']}: {movement}")
+                    add_log(f"Invalid movement command for Entity {entity['id']}: {movement}")
+                    continue
 
-                    # Apply movement logic
-                    if movement == "x+1":
-                        entity["x"] = (entity["x"] + 1) % GRID_SIZE
-                    elif movement == "x-1":
-                        entity["x"] = (entity["x"] - 1) % GRID_SIZE
-                    elif movement == "y+1":
-                        entity["y"] = (entity["y"] + 1) % GRID_SIZE
-                    elif movement == "y-1":
-                        entity["y"] = (entity["y"] - 1) % GRID_SIZE
-                    elif movement == "stay":
-                        logger.info(f"Entity {entity['id']} stays in place at {initial_position}.")
-                        add_log(f"Entity {entity['id']} stays in place at {initial_position}.")
-                        continue
-                    else:
-                        logger.warning(f"Invalid movement command for Entity {entity['id']}: {movement}")
-                        add_log(f"Invalid movement command for Entity {entity['id']}: {movement}")
-                        continue
-
-                    # Log and update position
-                    logger.info(f"Entity {entity['id']} moved from {initial_position} to ({entity['x']}, {entity['y']}) with action '{movement}'.")
-                    add_log(f"Entity {entity['id']} moved from {initial_position} to ({entity['x']}, {entity['y']}) with action '{movement}'.")
-                    await redis.hset(f"entity:{entity['id']}", mapping={"x": entity["x"], "y": entity["y"]})
+                # Log and update position
+                logger.info(f"Entity {entity['id']} moved from {initial_position} to ({entity['x']}, {entity['y']}) with action '{movement}'.")
+                add_log(f"Entity {entity['id']} moved from {initial_position} to ({entity['x']}, {entity['y']}) with action '{movement}'.")
+                await redis.hset(f"entity:{entity['id']}", mapping={"x": entity["x"], "y": entity["y"]})
 
             except Exception as e:
-                logger.error(f"Error during batch movement generation: {str(e)}")
-                add_log(f"Error during batch movement generation: {str(e)}")
+                logger.error(f"Error during movement generation for Entity {entity['id']}: {str(e)}")
+                add_log(f"Error during movement generation for Entity {entity['id']}: {str(e)}")
+            
+            # Optional: Throttle requests to prevent overwhelming the LLM
             await asyncio.sleep(REQUEST_DELAY)
 
         logger.info(f"Completed {request.steps} step(s).")

@@ -1,9 +1,10 @@
+import httpx
 import logging
 import os
 from logging.handlers import RotatingFileHandler
 from collections import deque
 from datetime import datetime
-from config import LOG_FILE, LOG_QUEUE_MAX_SIZE, LOG_LEVEL
+from config import LOG_FILE, LOG_QUEUE_MAX_SIZE, LOG_LEVEL, MTNN_API_ENDPOINT
 
 # Initialize the log queue with the size from config
 LOG_QUEUE = deque(maxlen=LOG_QUEUE_MAX_SIZE)
@@ -63,3 +64,34 @@ def adjust_log_queue_size(new_maxlen: int):
     current_logs = list(LOG_QUEUE)  # Copy current logs
     LOG_QUEUE.clear()  # Clear the old queue
     LOG_QUEUE = deque(current_logs, maxlen=new_maxlen)  # Set new size
+
+async def submit_summary(world_id: int, summary: list):
+    """
+    Submit a world state summary to the mTNN API endpoint.
+    
+    Args:
+        world_id (int): The ID of the world being summarized.
+        summary (list): The summary vector representing the world state.
+
+    Returns:
+        dict: Response from the mTNN API or error details.
+    """
+    try:
+        logger.info(f"Submitting summary for World {world_id} to mTNN: {summary}")
+        payload = {"world_id": world_id, "summary": summary}
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(MTNN_API_ENDPOINT, json=payload)
+
+        if response.status_code == 200:
+            logger.info(f"Summary successfully sent for World {world_id}. Response: {response.json()}")
+            return response.json()
+        else:
+            error_msg = f"Failed to send summary for World {world_id}. HTTP {response.status_code}: {response.text}"
+            logger.error(error_msg)
+            return {"error": error_msg}
+    except Exception as e:
+        error_msg = f"Error submitting summary for World {world_id}: {str(e)}"
+        logger.error(error_msg)
+        add_log(error_msg)
+        return {"error": error_msg}

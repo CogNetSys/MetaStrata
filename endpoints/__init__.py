@@ -7,6 +7,7 @@ from .visualizations import router as visualizations_router
 from .entities import router as entities_router
 from .utilities import router as utilities_router
 from .logs import router as logs_router
+from .mtnn import router as mtnn_router
 
 # Create a master router
 router = APIRouter()
@@ -18,3 +19,4 @@ router.include_router(visualizations_router, prefix="/visualization", tags=["Vis
 router.include_router(entities_router, prefix="/entities", tags=["Entities"]) 
 router.include_router(utilities_router, prefix="/utilities")
 router.include_router(logs_router, prefix="/logs", tags=["Logs"])
+router.include_router(mtnn_router, prefix="/mtnn", tags=["mTNN"])
