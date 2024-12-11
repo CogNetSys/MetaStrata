@@ -26,6 +26,7 @@ from dotenv import load_dotenv
 from redis.asyncio import Redis
 from supabase import create_client, Client
 from asyncio import Semaphore
+from contextlib import asynccontextmanager
 from collections import deque
 from datetime import datetime
 from endpoints import router
@@ -50,9 +51,7 @@ from config import (
     DEFAULT_MESSAGE_GENERATION_PROMPT,
     DEFAULT_MEMORY_GENERATION_PROMPT,
     DEFAULT_MOVEMENT_GENERATION_PROMPT,
-    LOG_FILE,
-    LOG_QUEUE_MAX_SIZE,
-    LOG_LEVEL
+    LOG_FILE
 )
 
 load_dotenv()
@@ -94,15 +93,12 @@ class BatchMessage(BaseModel):
     entity_id: int
     message: str
 
-class BatchMessagesPayload(BaseModel):
-    messages: List[BatchMessage]
-
 # Data Models
 class StepRequest(BaseModel):
     steps: int
 
 # Logging Configuration
-logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("simulation_app")
 
 # Use the dynamic log file path
@@ -145,15 +141,11 @@ def construct_prompt(template, entity, messages):
 # Helper function to fetch Prompts from FastAPI
 async def fetch_prompts_from_fastapi():
     async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get("http://localhost:8000/customization/prompts")
-            if response.status_code == 200:
-                return response.json()  # Return the fetched prompts
-            else:
-                logger.warning("Failed to fetch prompts, using default ones.")
-                return {}  # Return an empty dict to trigger the default prompts
-        except Exception as e:
-            logger.error(f"Error fetching prompts from FastAPI: {e}")
+        response = await client.get("http://localhost:8000/customization/prompts")
+        if response.status_code == 200:
+            return response.json()  # Return the fetched prompts
+        else:
+            logger.warning("Failed to fetch prompts, using default ones.")
             return {}  # Return an empty dict to trigger the default prompts
 
 # Helper Function to add logs to the queue
@@ -161,8 +153,6 @@ def add_log(message: str):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     formatted_message = f"[{timestamp}] {message}"
     LOG_QUEUE.append(formatted_message)
-    if len(LOG_QUEUE) > LOG_QUEUE_MAX_SIZE:
-        LOG_QUEUE.popleft()  # Maintain the queue size
     logger.info(formatted_message)  # Log to the standard logger as well
 
 async def send_llm_request(prompt):
@@ -209,7 +199,7 @@ async def intialize_entities():
         entity_key = f"entity:{entity['id']}"
         await redis.hset(entity_key, mapping=entity)
         await redis.lpush("entity_keys", entity_key)  # Add to entity_keys list
-        await redis.delete(f"entity:{entity['id']}:messages")  # Clear message queue
+        await redis.delete(f"{entity['id']}:messages")  # Clear message queue
 
     logger.info("Entities initialized.")
     return entities
@@ -242,15 +232,14 @@ async def lifespan(app: FastAPI):
     logger.info("Starting application lifespan...")
     try:
         # Startup logic
-        await redis.ping()  # Asynchronous ping
+        redis.ping()  # Synchronous, no need for await
         logger.info("Redis connection established.")
         yield  # Application is running
-        entities = await intialize_entities()
     finally:
         # Shutdown logic
         logger.info("Shutting down application...")
         stop_signal = True  # Ensure simulation stops if running
-        await redis.close()  # Asynchronous close
+        redis.close()  # Synchronous, no need for await
         logger.info("Redis connection closed.")
 
 # Create FastAPI app with lifespan
@@ -359,6 +348,7 @@ async def custom_swagger_ui_html():
                     });
                 }
 
+                document.addEventListener("DOMContentLoaded", function () {
                 // Get all buttons inside the controls section
                 const buttons = document.querySelectorAll("#websocket-controls button");
 
@@ -400,14 +390,32 @@ async def custom_swagger_ui_html():
                     });
                 });
             });
+
+            });
         </script>
     '''
     modified_html = html.body.decode("utf-8").replace("</body>", f"{custom_script}{log_area}</body>")
-
+    
     return HTMLResponse(modified_html)
 
-# Redis client initialization is handled via lifespan context manager
-# Remove redundant startup and shutdown event handlers to prevent conflicts
+# Redis client initialization
+@app.on_event("startup")
+def startup():
+    try:
+        # Check Redis connection synchronously
+        redis.ping()
+        logger.info("Connected to Redis")
+    except Exception as e:
+        logger.error(f"Error connecting to Redis: {str(e)}")
+
+@app.on_event("shutdown")
+def shutdown():
+    try:
+        # Close Redis connection synchronously
+        redis.close()
+        logger.info("Closed Redis connection")
+    except Exception as e:
+        logger.error(f"Error closing Redis: {str(e)}")
 
 @app.exception_handler(HTTPException)
 async def custom_http_exception_handler(request, exc):
@@ -441,7 +449,7 @@ async def perform_steps(request: StepRequest):
 
     try:
         add_log(f"Simulation steps requested: {request.steps} step(s).")
-
+        
         # Fetch the current prompt templates from FastAPI
         prompts = await fetch_prompts_from_fastapi()
         add_log("Fetched prompt templates successfully.")
@@ -472,22 +480,17 @@ async def perform_steps(request: StepRequest):
                     add_log(f"Skipping invalid key {key} of type {key_type}")
 
             # Fetch entity data from Redis for all valid keys
-            entities_data = await asyncio.gather(*[redis.hgetall(key) for key in valid_entity_keys])
-            entities = []
-            for entity_data in entities_data:
-                if entity_data:
-                    # Convert bytes to strings if necessary
-                    if isinstance(entity_data, dict):
-                        entity = {
-                            "id": int(entity_data.get("id", 0)),
-                            "name": entity_data.get("name", ""),
-                            "x": int(entity_data.get("x", 0)),
-                            "y": int(entity_data.get("y", 0)),
-                            "memory": entity_data.get("memory", "")
-                        }
-                        entities.append(entity)
-                    else:
-                        add_log(f"Invalid entity data: {entity_data}")
+            entities = [
+                {
+                    "id": int(entity_data["id"]),
+                    "name": entity_data["name"],
+                    "x": int(entity_data["x"]),
+                    "y": int(entity_data["y"]),
+                    "memory": entity_data.get("memory", "")
+                }
+                for entity_data in await asyncio.gather(*[redis.hgetall(key) for key in valid_entity_keys])
+                if entity_data  # Ensure we only include valid entity data
+            ]
 
             logger.info(f"Processing {len(entities)} entities.")
             add_log(f"Processing {len(entities)} entities for step {step + 1}.")
@@ -524,7 +527,7 @@ async def perform_steps(request: StepRequest):
                     message_result = await send_llm_request(
                         construct_prompt(message_prompt, entity, messages)
                     )
-                    if "message" in message_result and message_result["message"]:
+                    if "message" in message_result:
                         await redis.hset(f"entity:{entity['id']}", "message", message_result["message"])
                         add_log(f"Message generated for Entity {entity['id']}: {message_result['message']}")
                 except Exception as e:
@@ -545,7 +548,7 @@ async def perform_steps(request: StepRequest):
                     memory_result = await send_llm_request(
                         construct_prompt(memory_prompt, entity, messages)
                     )
-                    if "memory" in memory_result and memory_result["memory"]:
+                    if "memory" in memory_result:
                         await redis.hset(f"entity:{entity['id']}", "memory", memory_result["memory"])
                         add_log(f"Memory updated for Entity {entity['id']}: {memory_result['memory']}")
                 except Exception as e:
@@ -558,84 +561,43 @@ async def perform_steps(request: StepRequest):
                 add_log("Simulation steps halted after memory generation by stop signal.")
                 break
 
-            # Movement Generation (Batch Processing)
-            try:
-                movement_prompt_template = prompts.get("movement_generation_prompt", DEFAULT_MOVEMENT_GENERATION_PROMPT)
+            # Movement Generation
+            for entity in entities:
+                try:
+                    movement_prompt = prompts.get("movement_generation_prompt", DEFAULT_MOVEMENT_GENERATION_PROMPT)
+                    movement_result = await send_llm_request(
+                        construct_prompt(movement_prompt, entity, [])
+                    )
+                    if "movement" in movement_result:
+                        movement = movement_result["movement"].strip().lower()
+                        initial_position = (entity["x"], entity["y"])
 
-                # Generate movement prompts dynamically for each entity
-                movement_prompts = [
-                    construct_prompt(DEFAULT_MOVEMENT_GENERATION_PROMPT, entity, [])
-                    for entity in entities
-                ]
+                        # Apply movement logic
+                        if movement == "x+1":
+                            entity["x"] = (entity["x"] + 1) % GRID_SIZE
+                        elif movement == "x-1":
+                            entity["x"] = (entity["x"] - 1) % GRID_SIZE
+                        elif movement == "y+1":
+                            entity["y"] = (entity["y"] + 1) % GRID_SIZE
+                        elif movement == "y-1":
+                            entity["y"] = (entity["y"] - 1) % GRID_SIZE
+                        elif movement == "stay":
+                            logger.info(f"Entity {entity['id']} stays in place at {initial_position}.")
+                            add_log(f"Entity {entity['id']} stays in place at {initial_position}.")
+                            continue
+                        else:
+                            logger.warning(f"Invalid movement command for Entity {entity['id']}: {movement}")
+                            add_log(f"Invalid movement command for Entity {entity['id']}: {movement}")
+                            continue
 
-                # Combine individual prompts into a single batch prompt
-                batch_prompt = "\n\n".join(movement_prompts)
-
-                # Add system prompt at the beginning
-                system_prompt = """
-                You are an AI assistant helping multiple entities decide their next moves based on their individual states.
-                Please respond with a comma-separated list of actions corresponding to each entity in the order they were presented.
-                Each action should be one of the following: "x+1", "x-1", "y+1", "y-1", or "stay".
-                Provide no additional text or explanations.
-                """
-                full_prompt = system_prompt.strip() + "\n\n" + batch_prompt
-
-                add_log("Sending batch movement prompt to LLM.")
-                movement_result = await send_llm_request(full_prompt)
-
-                # Log the raw LLM movement response
-                logger.debug(f"Raw LLM movement response: {movement_result}")
-                add_log(f"Raw LLM movement response: {movement_result}")
-
-                movement_response = movement_result.get("movement", "")
-                movement_list = [m.strip() for m in movement_response.split(",")]
-
-                if len(movement_list) != len(entities):
-                    logger.warning(f"Expected {len(entities)} movement actions, but received {len(movement_list)}.")
-                    add_log(f"Mismatch in movement actions: expected {len(entities)}, got {len(movement_list)}.")
-                    # Trim extra actions or add "stay" for missing ones
-                    if len(movement_list) > len(entities):
-                        movement_list = movement_list[:len(entities)]
-                    else:
-                        movement_list += ["stay"] * (len(entities) - len(movement_list))
-
-                # Validate movements and set invalid ones to "stay"
-                valid_movements = {"x+1", "x-1", "y+1", "y-1", "stay"}
-                movement_list = [
-                    movement if movement in valid_movements else "stay"
-                    for movement in movement_list
-                ]
-
-                for entity, movement in zip(entities, movement_list):
-                    initial_position = (entity["x"], entity["y"])
-
-                    # Apply movement logic
-                    if movement == "x+1":
-                        entity["x"] = (entity["x"] + 1) % GRID_SIZE
-                    elif movement == "x-1":
-                        entity["x"] = (entity["x"] - 1) % GRID_SIZE
-                    elif movement == "y+1":
-                        entity["y"] = (entity["y"] + 1) % GRID_SIZE
-                    elif movement == "y-1":
-                        entity["y"] = (entity["y"] - 1) % GRID_SIZE
-                    elif movement == "stay":
-                        logger.info(f"Entity {entity['id']} stays in place at {initial_position}.")
-                        add_log(f"Entity {entity['id']} stays in place at {initial_position}.")
-                        continue
-                    else:
-                        logger.warning(f"Invalid movement command for Entity {entity['id']}: {movement}")
-                        add_log(f"Invalid movement command for Entity {entity['id']}: {movement}")
-                        continue
-
-                    # Log and update position
-                    logger.info(f"Entity {entity['id']} moved from {initial_position} to ({entity['x']}, {entity['y']}) with action '{movement}'.")
-                    add_log(f"Entity {entity['id']} moved from {initial_position} to ({entity['x']}, {entity['y']}) with action '{movement}'.")
-                    await redis.hset(f"entity:{entity['id']}", mapping={"x": entity["x"], "y": entity["y"]})
-
-            except Exception as e:
-                logger.error(f"Error during batch movement generation: {str(e)}")
-                add_log(f"Error during batch movement generation: {str(e)}")
-            await asyncio.sleep(REQUEST_DELAY)
+                        # Log and update position
+                        logger.info(f"Entity {entity['id']} moved from {initial_position} to ({entity['x']}, {entity['y']}) with action '{movement}'.")
+                        add_log(f"Entity {entity['id']} moved from {initial_position} to ({entity['x']}, {entity['y']}) with action '{movement}'.")
+                        await redis.hset(f"entity:{entity['id']}", mapping={"x": entity["x"], "y": entity["y"]})
+                except Exception as e:
+                    logger.error(f"Error generating movement for Entity {entity['id']}: {str(e)}")
+                    add_log(f"Error generating movement for Entity {entity['id']}: {str(e)}")
+                await asyncio.sleep(REQUEST_DELAY)
 
         logger.info(f"Completed {request.steps} step(s).")
         add_log(f"Simulation steps completed: {request.steps} step(s).")
@@ -645,271 +607,6 @@ async def perform_steps(request: StepRequest):
         logger.error(f"Unexpected error during simulation steps: {str(e)}")
         add_log(f"Unexpected error during simulation steps: {str(e)}")
         raise HTTPException(status_code=500, detail=f"An error occurred during simulation steps: {str(e)}")
-
-@app.get("/entities/{entity_id}/messages", response_model=Optional[str], tags=["Entity Messaging"])
-async def retrieve_message(entity_id: int):
-    """
-    Retrieve the current message for a specific entity.
-    """
-    try:
-        # Validate that the entity exists
-        entity_key = f"entity:{entity_id}"
-        if not await redis.exists(entity_key):
-            error_message = f"Entity with ID {entity_id} not found."
-            add_log(error_message)
-            raise HTTPException(status_code=404, detail=error_message)
-
-        # Fetch the message field for the entity
-        message = await redis.hget(entity_key, "message")
-        if not message:
-            add_log(f"No current message found for Entity {entity_id}.")
-            return None  # Return None if no message exists
-
-        add_log(f"Retrieved current message for Entity {entity_id}: \"{message}\".")
-        return message
-    except Exception as e:
-        error_message = f"Error retrieving message for Entity {entity_id}: {str(e)}"
-        add_log(error_message)
-        raise HTTPException(status_code=500, detail=error_message)
-    
-@app.post("/entities/{recipient_id}/create_memory", tags=["Entity Messaging"])
-async def create_memory(
-    recipient_id: int,
-    message: str = Query(..., description="The memory content to add or update for the recipient entity.")
-):
-    """
-    Create a memory for an entity. 
-    DIRECTIONS: Append a memory to their existing memory field. 
-    Enter the integer of the Entity you wish to add a memory to and the memory content to add for the recipient entity.
-    """
-    recipient_key = f"entity:{recipient_id}"
-
-    try:
-        # Log the attempt to create memory
-        add_log(f"Creating a memory for Entity {recipient_id}: \"{message}\".")
-
-        # Validate that the recipient exists
-        if not await redis.exists(recipient_key):
-            error_message = f"Recipient Entity ID {recipient_id} not found."
-            add_log(error_message)
-            raise HTTPException(status_code=404, detail=error_message)
-
-        # Fetch the recipient's existing memory field
-        existing_memory = await redis.hget(recipient_key, "memory")
-        if existing_memory:
-            # Append the new message to the recipient's memory
-            updated_memory = f"{existing_memory}\n{message}"
-        else:
-            # Start the memory with the new message
-            updated_memory = message
-
-        # Update the recipient's memory field
-        await redis.hset(recipient_key, "memory", updated_memory)
-        add_log(f"Memory updated successfully for Entity {recipient_id}: \"{message}\".")
-
-        return {"status": "Memory updated successfully", "message": message}
-
-    except Exception as e:
-        # Log and raise any unexpected errors
-        error_message = f"Error creating memory for Entity {recipient_id}: {str(e)}"
-        add_log(error_message)
-        raise HTTPException(status_code=500, detail=error_message)
-    
-@app.post("/entities/{recipient_id}/send_message", tags=["Entity Messaging"])
-async def send_message(
-    recipient_id: int,
-    message: str = Query(..., description="The message to send to the recipient entity.")
-):
-    """
-    Send a message as an entity.
-    DIRECTIONS: Append a message to a designated entity's existing message field.
-    This means you are sending a message as the designated entity to the surrounding entities. 
-    The designated entity does not receive the message.
-    """
-    recipient_key = f"entity:{recipient_id}"
-
-    try:
-        # Log the attempt to send a message
-        add_log(f"Attempting to send a message to Entity {recipient_id}: \"{message}\".")
-
-        # Validate that the recipient exists
-        if not await redis.exists(recipient_key):
-            error_message = f"Recipient Entity ID {recipient_id} not found."
-            add_log(error_message)
-            add_log(f"Entity {recipient_id} not found.")
-            raise HTTPException(status_code=404, detail=error_message)
-
-        # Fetch the existing message (if any)
-        existing_message = await redis.hget(recipient_key, "message") or ""
-
-        # Append the new message, separating with a delimiter if needed
-        updated_message = existing_message + "\n" + message if existing_message else message
-
-        # Update the `message` field with the appended message
-        await redis.hset(recipient_key, "message", updated_message)
-
-        # Log the successful message update
-        add_log(f"Message appended successfully to Entity {recipient_id}: \"{message}\".")
-
-        return {"status": "Message appended successfully", "recipient_id": recipient_id, "message": updated_message}
-
-    except Exception as e:
-        # Log and raise any unexpected errors
-        error_message = f"Error sending message to Entity {recipient_id}: {str(e)}"
-        add_log(error_message)
-        raise HTTPException(status_code=500, detail=error_message)
-
-@app.get("/entities/{entity_id}/nearby", response_model=List[Entity], tags=["Entity Messaging"])
-async def get_nearby_entities(entity_id: int):
-    """
-    Get entities within the messaging range of a specific entity.
-    DIRECTIONS: Enter the integer of the entity you wish to message and execute. 
-    The response body reveals any entities within the messaging range of the entity you wish to message. 
-    Note the "id" of the entity and then use "Send Message" to send a message as the "id" of that entity so your chosen entity receives the message. 
-    The sending entity will not have a memory of the message being sent.
-    """
-    try:
-        # Log the attempt to fetch nearby entities
-        add_log(f"Fetching nearby entities for Entity ID {entity_id}.")
-
-        # Get the entity's position from Redis
-        entity_data = await redis.hgetall(f"entity:{entity_id}")
-        if not entity_data:
-            error_message = f"Entity with ID {entity_id} not found."
-            add_log(error_message)
-            raise HTTPException(status_code=404, detail=error_message)
-
-        entity = Entity(**entity_data)
-
-        # Fetch all entities except the current one
-        all_entities_data = await asyncio.gather(*[
-            redis.hgetall(f"entity:{i}") for i in range(NUM_ENTITIES) if i != entity_id
-        ])
-        all_entities = []
-        for data in all_entities_data:
-            if data:
-                all_entities.append(Entity(**data))
-
-        # Filter nearby entities based on Chebyshev distance
-        nearby_entities = [
-            a for a in all_entities
-            if chebyshev_distance(entity.x, entity.y, a.x, a.y) <= CHEBYSHEV_DISTANCE
-        ]
-
-        add_log(f"Nearby entities fetched successfully for Entity ID {entity_id}. Total nearby entities: {len(nearby_entities)}.")
-        return nearby_entities
-    except Exception as e:
-        # Log and raise any unexpected errors
-        error_message = f"Error fetching nearby entities for Entity ID {entity_id}: {str(e)}"
-        add_log(error_message)
-        raise HTTPException(status_code=500, detail=error_message)
-
-@app.post("/entities/update_batch_memory", tags=["Entity Messaging"])
-async def update_batch_memory(payload: BatchMessagesPayload):
-    """
-    Update the `memory` field of multiple entities in one request.
-
-    This function appends the provided content to the `memory` field of the respective entities in Redis.
-    """
-    try:
-        updated_entities = []
-        for msg in payload.messages:
-            entity_key = f"entity:{msg.entity_id}"
-            
-            # Validate that the entity exists
-            if not await redis.exists(entity_key):
-                add_log(f"Entity {msg.entity_id} not found. Skipping update.")
-                continue
-            
-            # Fetch the current memory for the entity (if it exists)
-            existing_memory = await redis.hget(entity_key, "memory") or ""
-            
-            # Append the new content to the existing memory, separated by a newline
-            updated_memory = f"{existing_memory}\n{msg.message}".strip()
-            
-            # Update the `memory` field with the appended content
-            await redis.hset(entity_key, "memory", updated_memory)
-            updated_entities.append(msg.entity_id)
-        
-        add_log(f"Batch memory updates applied to Entities: {updated_entities}.")
-        return {"status": "success", "updated_entities": updated_entities}
-    
-    except Exception as e:
-        error_message = f"Custom Error: Error updating batch memory: {str(e)}"
-        add_log(error_message)
-        raise HTTPException(status_code=500, detail=error_message)
-
-@app.delete("/entities/{entity_id}/memory", tags=["Entity Messaging"])
-async def clear_memory(entity_id: int):
-    """
-    Wipe an entity's memory field.
-    """
-    try:
-        entity_key = f"entity:{entity_id}"
-        
-        # Validate entity exists
-        if not await redis.exists(entity_key):
-            error_message = f"Entity with ID {entity_id} not found."
-            add_log(error_message)
-            raise HTTPException(status_code=404, detail=error_message)
-        
-        # Clear the memory field
-        await redis.hset(entity_key, "memory", "")
-        add_log(f"Memory cleared for Entity {entity_id}.")
-        return {"status": "success", "message": f"Memory cleared for Entity {entity_id}."}
-    except Exception as e:
-        error_message = f"Error clearing memory for Entity {entity_id}: {str(e)}"
-        add_log(error_message)
-        raise HTTPException(status_code=500, detail=error_message)
-
-@app.post("/entities/broadcast_message", tags=["Entity Messaging"])
-async def broadcast_message(message: str):
-    """
-    Broadcast a message to all entities.
-    """
-    try:
-        # Fetch all entity keys
-        entity_keys = await redis.keys("entity:*")
-        if not entity_keys:
-            add_log("No entities found to broadcast the message.")
-            raise HTTPException(status_code=404, detail="No entities found.")
-
-        # Broadcast the message to all entities
-        for key in entity_keys:
-            entity_id = key.split(":")[1]  # Extract entity ID
-            message_key = f"entity:{entity_id}:messages"
-            await redis.lpush(message_key, message)
-
-        # Log the broadcast action
-        add_log(f"Broadcast message to all entities: {message}")
-        return {"status": "success", "message": f"Broadcasted message to {len(entity_keys)} entities."}
-    except Exception as e:
-        error_message = f"Error broadcasting message: {str(e)}"
-        add_log(error_message)
-        raise HTTPException(status_code=500, detail=error_message)
-
-@app.delete("/entities/{entity_id}/messages", tags=["Entity Messaging"])
-async def clear_all_messages(entity_id: int):
-    """
-    Remove all messages for a specific entity.
-    """
-    try:
-        message_key = f"entity:{entity_id}:messages"
-
-        # Validate that the message key exists
-        if not await redis.exists(message_key):
-            error_message = f"No messages found for Entity {entity_id}."
-            add_log(error_message)
-            raise HTTPException(status_code=404, detail=error_message)
-
-        # Clear all messages
-        await redis.delete(message_key)
-        add_log(f"All messages cleared for Entity {entity_id}.")
-        return {"status": "success", "message": f"All messages cleared for Entity {entity_id}."}
-    except Exception as e:
-        error_message = f"Error clearing messages for Entity {entity_id}: {str(e)}"
-        add_log(error_message)
-        raise HTTPException(status_code=500, detail=error_message)
 
 # WebSocket Endpoint for Real-Time Logs
 @app.websocket("/logs")
