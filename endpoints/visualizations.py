@@ -8,14 +8,14 @@ import numpy as np
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from endpoints.database import redis, supabase
-from config import GRID_SIZE
+from config import GRID_SIZE, CONNECTIVITY_GRAPH
 from utils import add_log, LOG_QUEUE, logger
 
 grid_size = GRID_SIZE
 
 router = APIRouter()
 
-# Entity Grid
+# Entity Grid Visualization
 @router.get("/grid", tags=["Visualization"])
 async def generate_grid_visualization():
     """
@@ -27,11 +27,8 @@ async def generate_grid_visualization():
         if not entity_keys:
             raise HTTPException(status_code=404, detail="No entities found.")
 
-        # Get grid size from configuration
-        grid_size = GRID_SIZE  # Assume GRID_SIZE is defined in your settings
-
         # Create a blank grid
-        grid = np.full((grid_size, grid_size), "", dtype=object)
+        grid = np.full((GRID_SIZE, GRID_SIZE), "", dtype=object)
 
         # Place entities on the grid
         for key in entity_keys:
@@ -41,18 +38,18 @@ async def generate_grid_visualization():
 
         # Plot the grid
         fig, ax = plt.subplots(figsize=(8, 8))
-        ax.set_xticks(np.arange(0, grid_size, 1))
-        ax.set_yticks(np.arange(0, grid_size, 1))
-        ax.set_xticks(np.arange(-0.5, grid_size, 1), minor=True)
-        ax.set_yticks(np.arange(-0.5, grid_size, 1), minor=True)
+        ax.set_xticks(np.arange(0, GRID_SIZE, 1))
+        ax.set_yticks(np.arange(0, GRID_SIZE, 1))
+        ax.set_xticks(np.arange(-0.5, GRID_SIZE, 1), minor=True)
+        ax.set_yticks(np.arange(-0.5, GRID_SIZE, 1), minor=True)
         ax.grid(which="minor", color="gray", linestyle="-", linewidth=0.5)
         ax.tick_params(which="major", bottom=False, left=False, labelbottom=False, labelleft=False)
 
         # Annotate with entity numbers
-        for y in range(grid_size):
-            for x in range(grid_size):
+        for y in range(GRID_SIZE):
+            for x in range(GRID_SIZE):
                 if grid[y][x]:
-                    ax.text(x + 0.5, grid_size - y - 0.5, grid[y][x], ha="center", va="center", color="blue")
+                    ax.text(x + 0.5, GRID_SIZE - y - 0.5, grid[y][x], ha="center", va="center", color="blue")
 
         # Save the grid to a BytesIO stream
         buf = io.BytesIO()
@@ -60,14 +57,50 @@ async def generate_grid_visualization():
         buf.seek(0)
         plt.close()
 
-        # Return the image as a StreamingResponse
         return StreamingResponse(buf, media_type="image/png")
 
     except Exception as e:
         error_message = f"Error generating grid visualization: {str(e)}"
         raise HTTPException(status_code=500, detail=error_message)
 
-# Heatmap visualization
+
+# Connectivity Graph Visualization
+@router.get("/visualization/connectivity", tags=["Visualization"])
+async def connectivity_graph_visualization():
+    """
+    Generate a graph visualization of the world's connectivity.
+    """
+    try:
+        # Plot the connectivity graph
+        fig, ax = plt.subplots(figsize=(10, 10))
+        pos = nx.spring_layout(CONNECTIVITY_GRAPH)  # Positions for all nodes
+        nx.draw(
+            CONNECTIVITY_GRAPH,
+            pos,
+            ax=ax,
+            with_labels=True,
+            node_size=700,
+            node_color="skyblue",
+            font_size=10,
+            font_color="black",
+            edge_color="gray",
+        )
+        ax.set_title("World Connectivity Graph")
+
+        # Save the graph to a BytesIO stream
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png")
+        buf.seek(0)
+        plt.close()
+
+        return StreamingResponse(buf, media_type="image/png")
+
+    except Exception as e:
+        error_message = f"Error generating connectivity graph visualization: {str(e)}"
+        raise HTTPException(status_code=500, detail=error_message)
+
+
+# Heatmap Visualization
 @router.get("/visualization/heatmap", tags=["Visualization"])
 async def agent_location_heatmap():
     """
@@ -103,8 +136,7 @@ async def agent_location_heatmap():
     except Exception as e:
         error_message = f"Error generating heatmap: {str(e)}"
         raise HTTPException(status_code=500, detail=error_message)
-
-
+    
 # Trajectory visualization
 @router.get("/visualization/trajectory", tags=["Visualization"])
 async def trajectory_visualization():

@@ -1,43 +1,33 @@
-import os
-import io
+# main.py
+
 import random
 import asyncio
 import json
 import httpx
 import logging
-import matplotlib.pyplot as plt
-import networkx as nx
-import numpy as np
-import time
 import traceback
-import tracemalloc
-from pydantic_ai.models.groq import GroqModel, GroqModelName
-from endpoints.database import redis, supabase
-from utils import add_log, LOG_QUEUE, logger, submit_summary
+from asyncio import Lock, Semaphore
 from contextlib import asynccontextmanager
-from typing import Dict, List, Optional
-from fastapi import FastAPI, HTTPException, WebSocket, File, UploadFile, APIRouter, Query
-from fastapi.responses import JSONResponse, HTMLResponse, FileResponse, StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.openapi.docs import get_swagger_ui_html
-from pydantic import BaseModel, Field
-from dotenv import load_dotenv
-from redis.asyncio import Redis
-from supabase import create_client, Client
-from asyncio import Semaphore
-from collections import deque
+from core.app import app
 from datetime import datetime
+from dotenv import load_dotenv
+from fastapi import Body, Path, Query, HTTPException, WebSocket
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from endpoints import router
+from endpoints.database import redis
+from endpoints.simulation import initialize_world
+from pydantic import BaseModel
 from pydantic_ai import Agent
+from pydantic_ai.models.groq import GroqModel
+from redis.asyncio.lock import Lock
+from typing import Dict, List, Optional
+from utils import add_log, LOG_QUEUE, logger, submit_summary
 from world import World
 from config import (
-    SUPABASE_URL,
-    SUPABASE_KEY,
     GROQ_API_KEY,
-    GROQ_API_ENDPOINT,
-    REDIS_ENDPOINT,
-    REDIS_PASSWORD,
     GRID_SIZE,
     NUM_ENTITIES,
     MAX_STEPS,
@@ -56,7 +46,8 @@ from config import (
     LOG_LEVEL,
     MTNN_API_ENDPOINT,
     NUM_WORLDS,
-    create_world_config
+    create_world_config,
+    CONNECTIVITY_GRAPH
 )
 
 load_dotenv()
@@ -118,6 +109,9 @@ global_request_semaphore = Semaphore(MAX_CONCURRENT_REQUESTS)
 # Stop signal
 stop_signal = False
 
+# Initialize a dictionary to hold Redis locks for each world (0-based)
+world_locks: Dict[int, Lock] = {world_id: Lock(redis, f"lock:world:{world_id}", timeout=10) for world_id in range(NUM_WORLDS)}
+
 # Define GroqModel and Agent for pydantic_ai
 groq_model = GroqModel(
     model_name=LLM_MODEL,
@@ -135,13 +129,13 @@ agent = Agent(
 def chebyshev_distance(x1, y1, x2, y2):
     return max(abs(x1 - x2), abs(y1 - y2))
 
-def construct_prompt(template, entity, messages):
+def construct_prompt(template, entity: Entity, messages):
     sanitized_messages = [msg.replace("\n", " ").replace("\"", "'").strip() for msg in messages]
     messages_str = "\n".join(sanitized_messages) if sanitized_messages else "No recent messages."
-    memory = entity.get("memory", "No prior memory.").replace("\n", " ").replace("\"", "'")
+    memory = entity.memory.replace("\n", " ").replace("\"", "'")
 
     return template.format(
-        entityId=entity["id"], x=entity["x"], y=entity["y"],
+        entityId=entity.id, x=entity.x, y=entity.y,
         grid_description=GRID_DESCRIPTION, memory=memory,
         messages=messages_str, distance=CHEBYSHEV_DISTANCE
     )
@@ -169,7 +163,7 @@ def add_log(message: str):
         LOG_QUEUE.popleft()  # Maintain the queue size
     logger.info(formatted_message)  # Log to the standard logger as well
 
-# Helper function for WOrlds. Randomly selects a movement action for an agent.
+# Helper function for Worlds. Randomly selects a movement action for an agent.
 def determine_agent_movement(agent: Dict) -> Dict:
     """
     Determine the movement for an agent.
@@ -185,26 +179,45 @@ def determine_agent_movement(agent: Dict) -> Dict:
     movement = random.choice(movement_options)
     return movement
 
-# Helper function for WOrlds. Randomly generates messages between agents with a certain probability.
+# Helper function for Worlds. Randomly generates messages between agents with a certain probability.
 def generate_communications(world: World) -> List[Dict]:
     """
-    Generate communications between agents.
+    Generate communications between worlds.
     """
     messages = []
     for agent in world.agents:
         if random.random() < 0.1:  # 10% chance to send a message
-            recipient = random.choice(world.agents)
-            if recipient["id"] != agent["id"]:
+            # Example: Send a state summary request to a connected world
+            connected_worlds = list(CONNECTIVITY_GRAPH.neighbors(world.world_id))
+            if connected_worlds:
+                target_world_id = random.choice(connected_worlds)
                 message = {
-                    "sender_id": agent["id"],
-                    "recipient_id": recipient["id"],
-                    "content": f"Hello from Agent {agent['id']}!"
+                    "source_world_id": world.world_id,
+                    "message_type": "state_summary_request",
+                    "payload": {}
                 }
                 messages.append(message)
-                # Log the communication
-                add_log(f"Agent {agent['id']} sent message to Agent {recipient['id']}.")
+                # Use the messaging endpoint to send the message
+                asyncio.create_task(send_world_message_async(target_world_id, message))
+                add_log(f"World {world.world_id} sent 'state_summary_request' to World {target_world_id}.")
     return messages
 
+async def send_world_message_async(target_world_id: int, message: Dict):
+    """
+    Asynchronously send a message to another world using the API endpoint.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"http://localhost:8000/worlds/{target_world_id}/send_message",
+                json=message
+            )
+            if response.status_code == 200:
+                add_log(f"Successfully sent message to World {target_world_id}.")
+            else:
+                add_log(f"Failed to send message to World {target_world_id}: {response.text}")
+    except Exception as e:
+        add_log(f"Exception occurred while sending message to World {target_world_id}: {e}")
 
 async def send_llm_request(prompt):
     global stop_signal
@@ -231,79 +244,157 @@ async def send_llm_request(prompt):
             logger.error(f"Error during LLM request: {e}")
             return {"message": "", "memory": "", "movement": "stay"}
 
-async def intialize_entities():
+async def initialize_entities():
     logger.info("Resetting simulation state.")
-    await redis.flushdb()  # Clear all Redis data, including entity_keys
+    await redis.flushdb()  # Clear all Redis data, including entity_keys and world-specific data
 
-    entities = [
-        {
-            "id": i,
-            "name": f"Entity-{i}",
-            "x": random.randint(0, GRID_SIZE - 1),
-            "y": random.randint(0, GRID_SIZE - 1),
-            "memory": ""
-        }
-        for i in range(NUM_ENTITIES)
-    ]
+    entities = []
+    entities_per_world = NUM_ENTITIES // NUM_WORLDS
+    extra = NUM_ENTITIES % NUM_WORLDS  # Handle remainder
 
-    for entity in entities:
-        entity_key = f"entity:{entity['id']}"
-        await redis.hset(entity_key, mapping=entity)
-        await redis.lpush("entity_keys", entity_key)  # Add to entity_keys list
-        await redis.delete(f"entity:{entity['id']}:messages")  # Clear message queue
+    entity_id = 0
+    for world_id in range(1, NUM_WORLDS + 1):
+        num_agents = entities_per_world + (1 if world_id <= extra else 0)
+        for _ in range(num_agents):
+            entity = {
+                "id": entity_id,
+                "name": f"Entity-{entity_id}",
+                "x": random.randint(0, GRID_SIZE - 1),
+                "y": random.randint(0, GRID_SIZE - 1),
+                "memory": "",
+                "world_id": world_id  # Assign to a world
+            }
+            entity_key = f"entity:{entity_id}"
+            await redis.hset(entity_key, mapping=entity)
+            await redis.lpush("entity_keys", entity_key)  # Add to entity_keys list
+            await redis.delete(f"entity:{entity_id}:messages")  # Clear message queue
+            entities.append(entity)
+            entity_id += 1
 
-    logger.info("Entities initialized.")
+    logger.info(f"Entities initialized and assigned to {NUM_WORLDS} worlds.")
     return entities
-
 async def fetch_nearby_messages(entity, entities, message_to_send=None):
-    nearby_entities = [
-        a for a in entities if a["id"] != entity["id"] and chebyshev_distance(entity["x"], entity["y"], a["x"], a["y"]) <= CHEBYSHEV_DISTANCE
-    ]
-    received_messages = []
+    """
+    Fetch messages from nearby entities and optionally send a message to them.
 
-    for nearby_entity in nearby_entities:
-        # Fetch existing messages from the nearby entity
-        msg = await redis.hget(f"entity:{nearby_entity['id']}", "message")
-        logger.info(f"Fetched message for entity {nearby_entity['id']}: {msg}")
-        if msg:
-            received_messages.append(msg)
+    Args:
+        entity (dict): The entity fetching nearby messages.
+        entities (list): List of all entities.
+        message_to_send (str, optional): Message to send to nearby entities. Defaults to None.
 
-        # If a message is being sent, add it to the recipient's queue
-        if message_to_send:
-            recipient_key = f"entity:{nearby_entity['id']}:messages"
-            await redis.lpush(recipient_key, f"From Entity {entity['id']}: {message_to_send}")
-            logger.info(f"Sent message from Entity {entity['id']} to Entity {nearby_entity['id']}")
+    Returns:
+        list: A list of received messages from nearby entities.
+    """
+    try:
+        # Identify nearby entities within the defined Chebyshev distance
+        nearby_entities = [
+            a for a in entities
+            if a["id"] != entity["id"] and chebyshev_distance(entity["x"], entity["y"], a["x"], a["y"]) <= CHEBYSHEV_DISTANCE
+        ]
+        received_messages = []
 
-    return received_messages
+        # Fetch messages from nearby entities
+        for nearby_entity in nearby_entities:
+            msg = await redis.hget(f"entity:{nearby_entity['id']}", "message")
+            if msg:
+                logger.info(f"Fetched message for entity {nearby_entity['id']}: {msg}")
+                received_messages.append(msg)
 
-#World Simulation Functions
+            # If a message is being sent, add it to the recipient's queue
+            if message_to_send:
+                recipient_key = f"entity:{nearby_entity['id']}:messages"
+                await redis.lpush(recipient_key, f"From Entity {entity['id']}: {message_to_send}")
+                logger.info(f"Sent message from Entity {entity['id']} to Entity {nearby_entity['id']}")
+
+        return received_messages
+
+    except Exception as e:
+        logger.error(f"Error fetching or sending messages for Entity {entity['id']}: {e}")
+        return []
+
+# World Simulation Functions
 
 async def simulate_world_step(world: World):
     """
     Update the state of the world for one simulation step.
-    This includes updating agents, tasks, resources, and handling communications.
+    This includes updating agents, tasks, resources, handling communications, processing messages, and handling memory.
     """
     try:
-        # Example: Update agent positions
+        # Fetch world-specific tasks and resources
+        tasks = await redis.hgetall(f"world:{world.world_id}:tasks")
+        resources = await redis.hgetall(f"world:{world.world_id}:resources")
+        
+        # Convert tasks back to list of dicts
+        tasks = [json.loads(t) for t in tasks.values()]
+        resources['distribution'] = json.loads(resources['distribution'])
+
+        # Update agent positions
         for agent in world.agents:
             move = determine_agent_movement(agent)  # Implement this function
             agent["x"] = (agent["x"] + move["x"]) % world.grid_size
             agent["y"] = (agent["y"] + move["y"]) % world.grid_size
 
-        # Example: Update tasks
-        for task in world.tasks:
+        # Update tasks
+        for task in tasks:
             task["progress"] += task.get("increment", 0.1)
             task["progress"] = min(task["progress"], 1.0)  # Cap at 100%
 
-        # Example: Update resources
-        consumed = world.resources.get("consumed", 0) + 1  # Increment consumption
-        world.resources["consumed"] = consumed
+        # Update resources
+        consumed = int(resources.get("consumed", 0)) + 1  # Increment consumption
+        resources["consumed"] = consumed
 
-        # Example: Handle communications
+        # Handle communications
         messages = generate_communications(world)  # Implement this function
         world.communications.extend(messages)
 
-        logger.debug(f"World {world.world_id} state updated.")
+        # Handle memory updates
+        for agent in world.agents:
+            # Fetch nearby messages for the agent
+            nearby_messages = await fetch_nearby_messages(agent, world.agents)
+
+            # Update memory based on the messages received
+            if nearby_messages:
+                memory_update = "\n".join(nearby_messages)
+                agent["memory"] += f"\n{memory_update}"
+
+                # Optionally, truncate memory to avoid excessive growth
+                max_memory_size = 1000  # Adjust as needed
+                if len(agent["memory"]) > max_memory_size:
+                    agent["memory"] = agent["memory"][-max_memory_size:]
+
+        # Receive and process incoming messages via consumer groups
+        await world.receive_messages()
+
+        # Persist updated tasks, resources, and agent states back to Redis
+        pipeline = redis.pipeline()
+
+        # Update tasks
+        pipeline.delete(f"world:{world.world_id}:tasks")
+        for task in tasks:
+            pipeline.hset(f"world:{world.world_id}:tasks", f"task_{task['id']}", json.dumps(task))
+
+        # Update resources
+        resources['distribution'] = json.dumps(resources['distribution'])
+        pipeline.hset(f"world:{world.world_id}:resources", mapping={
+            "total": resources["total"],
+            "consumed": resources["consumed"],
+            "distribution": resources["distribution"]
+        })
+
+        # Update agents in Redis
+        for agent in world.agents:
+            agent_key = f"agent:{world.world_id}:{agent['id']}"
+            pipeline.hset(agent_key, mapping={
+                "x": agent["x"],
+                "y": agent["y"],
+                "memory": agent["memory"]
+            })
+
+        await pipeline.execute()
+
+        logger.debug(f"World {world.world_id} state updated with memory.")
+        add_log(f"World {world.world_id} state updated with memory.")
+
     except Exception as e:
         logger.error(f"Error simulating world {world.world_id} step: {e}")
         add_log(f"Error simulating world {world.world_id} step: {e}")
@@ -328,99 +419,144 @@ async def submit_summary(world_id: int, summary_vector: List[float]):
         logger.error(f"Error sending summary for World {world_id} to mTNN: {e}")
         add_log(f"Error sending summary for World {world_id} to mTNN: {e}")
 
-async def fetch_tasks_for_world(world_id: int) -> List[Dict]:
+async def resolve_messages_in_worlds(worlds):
     """
-    Fetch or initialize tasks for the given world.
+    Periodically resolve and route messages between worlds.
+    This function can be scheduled as a background task.
     """
-    # Placeholder implementation
-    tasks = []
-    for i in range(100):  # Example: 100 tasks
-        task = {
-            "id": i,
-            "progress": 0.0,
-            "duration": np.random.randint(1, 10),
-            "increment": 0.1  # Progress increment per step
-        }
-        tasks.append(task)
-    logger.info(f"Fetched {len(tasks)} tasks for World {world_id}.")
-    return tasks
+    while not stop_signal:
+        try:
+            for world in worlds:
+                if isinstance(world, World):
+                    await world.receive_messages()
+                    # Removed: world.process_messages()
+        except Exception as e:
+            logger.error(f"Error in message resolution loop: {e}")
+        await asyncio.sleep(1)  # Adjust interval as needed
 
-async def fetch_resources_for_world(world_id: int) -> Dict:
-    """
-    Fetch or initialize resources for the given world.
-    """
-    # Placeholder implementation
-    resources = {
-        "total": 1000,
-        "consumed": 0,
-        "distribution": {agent_id: 100 for agent_id in range(NUM_ENTITIES)}
-    }
-    logger.info(f"Fetched resources for World {world_id}.")
-    return resources
+# Initialize connectivity dynamically
+def initialize_connectivity(num_worlds: int):
+    for world_id in range(num_worlds):
+        # Define potential target world IDs excluding the current world_id
+        potential_targets = list(range(num_worlds))
+        potential_targets.remove(world_id)
 
-# Lifespan Context Manager
+        # Randomly select 1 to 3 connections
+        num_connections = random.randint(1, 3)
+        connections = random.sample(potential_targets, min(num_connections, len(potential_targets)))
+
+        # Add edges to the connectivity graph
+        for target_id in connections:
+            CONNECTIVITY_GRAPH.add_edge(world_id, target_id)
+
+        add_log(f"World {world_id} connected to Worlds {connections}.")
+
+async def get_entities_by_world(world_id: int):
+    """
+    Retrieve all entities associated with a specific world.
+    """
+    pattern = "entity:*"
+    entity_keys = await redis.keys(pattern)
+    entities = []
+    for key in entity_keys:
+        entity_data = await redis.hgetall(key)
+        if entity_data and int(entity_data.get("world_id", -1)) == world_id:
+            entity = Entity(
+                id=int(entity_data.get("id", 0)),
+                name=entity_data.get("name", ""),
+                x=int(entity_data.get("x", 0)),
+                y=int(entity_data.get("y", 0)),
+                memory=entity_data.get("memory", ""),
+            )
+            entities.append(entity)
+    return entities
+
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app):
     global stop_signal
     logger.info("Starting application lifespan...")
-    app.state.worlds = []
+
+    # Ensure `worlds` attribute exists
+    if not hasattr(app.state, "worlds"):
+        app.state.worlds = []
+
     try:
-        # Startup logic
-        await redis.ping()  # Asynchronous ping
+        # Redis initialization
+        await redis.ping()
         logger.info("Redis connection established.")
-        # entities = await intialize_entities()
 
-        for world_id in range(NUM_WORLDS):
-            # Initialize tasks for the world
-            tasks = [
-                {
-                    "id": i,
-                    "progress": 0.0,
-                    "duration": random.randint(5, 20),
-                    "increment": 0.1
+        # Adjust worlds based on NUM_WORLDS
+        current_count = len(app.state.worlds)
+        if NUM_WORLDS > current_count:
+            for i in range(current_count, NUM_WORLDS):
+                world_id = i  # 0-based indexing
+
+                # Initialize tasks
+                tasks = [
+                    {
+                        "id": t,
+                        "progress": 0.0,
+                        "duration": random.randint(5, 20),
+                        "increment": 0.1,
+                        "priority": 1.0,
+                    }
+                    for t in range(100)
+                ]
+
+                # Initialize resources
+                resources = {
+                    "total": 1000,
+                    "consumed": 0,
+                    "distribution": {agent_id: 100 for agent_id in range(NUM_ENTITIES)},
                 }
-                for i in range(100)  # Assuming 100 tasks per world
-            ]
 
-            # Initialize resources for the world
-            resources = {
-                "total": 1000,
-                "consumed": 0,
-                "distribution": {agent_id: 100 for agent_id in range(NUM_ENTITIES)}
-            }
+                # Create world configuration
+                world_config = create_world_config(
+                    world_id=world_id,
+                    grid_size=GRID_SIZE,
+                    num_agents=NUM_ENTITIES,
+                    tasks=tasks,
+                    resources=resources,
+                )
 
-            # Create the world configuration
-            world_config = create_world_config(
-                world_id=world_id,
-                grid_size=GRID_SIZE,
-                num_agents=NUM_ENTITIES,
-                tasks=tasks,  # Pass initialized tasks
-                resources=resources  # Pass initialized resources
-            )
+                # Create World instance
+                world = World(**world_config)
+                app.state.worlds.append(world)
+                logger.info(f"World {world.world_id} initialized with {world.num_agents} agents.")
 
-            logger.debug(f"World Config: {world_config}")  # Log the world_config to inspect
+                # Persist world state to Redis under separate namespaces
+                await initialize_world(world.world_id)
+                logger.info(f"World {world.world_id} persisted to Redis.")
 
-            # Create and append the world object
-            world = World(**world_config)  # Ensure the World class matches the configuration structure
-            app.state.worlds.append(world)
-            logger.info(f"World {world.world_id} initialized with {world.num_agents} agents.")
-        yield
+        elif NUM_WORLDS < current_count:
+            # Optionally handle world removal
+            app.state.worlds = app.state.worlds[:NUM_WORLDS]
+
+        logger.info(f"Adjusted to {NUM_WORLDS} worlds")
+
+        # Initialize dynamic connectivity graph
+        initialize_connectivity(NUM_WORLDS)
+        logger.info("Dynamic connectivity graph initialized.")
+
+        # Start background task for message resolution
+        asyncio.create_task(resolve_messages_in_worlds(app.state.worlds))
+
+        yield  # Application runs here
+
+    except Exception as e:
+        logger.error(f"Error during startup: {e}", exc_info=True)
 
     finally:
-        # Shutdown logic
         logger.info("Shutting down application...")
-        stop_signal = True  # Ensure simulation stops if running
-        await redis.close()  # Asynchronous close
-        logger.info("Redis connection closed.")
+        stop_signal = True
+        try:
+            await redis.close()
+            logger.info("Redis connection closed.")
+        except Exception as e:
+            logger.error(f"Error while closing Redis: {e}", exc_info=True)
 
-# Create FastAPI app with lifespan
-app = FastAPI(
-    title="Worlds Designer", 
-    version="0.0.3", 
-    description="API for World Simulations.",
-    docs_url=None, 
-    lifespan=lifespan
-)
+# Attach lifespan context manager
+app.router.lifespan_context = lifespan
 
 # Include the router
 app.include_router(router)
@@ -560,6 +696,72 @@ async def custom_swagger_ui_html():
                     });
                 });
             });
+
+            // WebSocket connection for real-time logs
+            let websocket;
+
+            function connectWebSocket() {
+                websocket = new WebSocket("ws://localhost:8000/logs");
+                
+                websocket.onopen = function(event) {
+                    addLog("Connected to WebSocket for real-time logs.");
+                };
+
+                websocket.onmessage = function(event) {
+                    const logsDiv = document.getElementById("websocket-logs");
+                    const logEntry = document.createElement("p");
+                    logEntry.textContent = event.data;
+                    logsDiv.appendChild(logEntry);
+                    logsDiv.scrollTop = logsDiv.scrollHeight; // Auto-scroll to the bottom
+                };
+
+                websocket.onclose = function(event) {
+                    addLog("WebSocket connection closed.");
+                };
+
+                websocket.onerror = function(error) {
+                    addLog("WebSocket error: " + error.message);
+                };
+            }
+
+            function addLog(message) {
+                const logsDiv = document.getElementById("websocket-logs");
+                const logEntry = document.createElement("p");
+                logEntry.textContent = message;
+                logsDiv.appendChild(logEntry);
+                logsDiv.scrollTop = logsDiv.scrollHeight; // Auto-scroll to the bottom
+            }
+
+            // Connect on page load
+            document.addEventListener("DOMContentLoaded", function() {
+                connectWebSocket();
+            });
+
+            // Reconnect button
+            const reconnectButton = document.getElementById("reconnect-stream");
+            if (reconnectButton) {
+                reconnectButton.addEventListener("click", function() {
+                    if (websocket.readyState === WebSocket.OPEN) {
+                        websocket.close();
+                    }
+                    connectWebSocket();
+                    addLog("Attempting to reconnect WebSocket...");
+                });
+            }
+
+            // Copy logs button
+            const copyLogsButton = document.getElementById("copy-logs");
+            if (copyLogsButton) {
+                copyLogsButton.addEventListener("click", function() {
+                    const logsDiv = document.getElementById("websocket-logs");
+                    const text = logsDiv.innerText;
+                    navigator.clipboard.writeText(text).then(() => {
+                        addLog("Logs copied to clipboard.");
+                    }).catch(err => {
+                        addLog("Failed to copy logs: " + err);
+                    });
+                });
+            }
         </script>
     '''
     modified_html = html.body.decode("utf-8").replace("</body>", f"{custom_script}{log_area}</body>")
@@ -594,7 +796,217 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.post("/step", tags=["World Simulation"])
+@app.post("/worlds/{world_id}/step", tags=["Simulation"])
+async def perform_steps_for_world(
+    world_id: int = Path(..., description="ID of the world to perform steps for"),
+    request: StepRequest = Body(...)
+):
+    """
+    Perform simulation steps for a specific world.
+
+    - **world_id**: ID of the world to perform steps for.
+    - **steps**: Number of simulation steps to perform.
+    """
+    # Validate the number of steps
+    if request.steps <= 0:
+        error_message = "Number of steps must be a positive integer."
+        add_log(error_message)
+        raise HTTPException(status_code=400, detail=error_message)
+
+    # Retrieve the lock for the specified world_id
+    lock = world_locks.get(world_id)
+    if not lock:
+        error_message = f"No lock found for World {world_id}."
+        add_log(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
+
+    # Acquire the Redis lock to prevent concurrent step executions
+    async with lock:
+        global stop_signal
+        stop_signal = False  # Reset stop signal before starting steps
+
+        try:
+            add_log(f"Simulation steps requested: {request.steps} step(s) for World {world_id}.")
+
+            # Fetch the current prompt templates from FastAPI
+            prompts = await fetch_prompts_from_fastapi()
+            add_log("Fetched prompt templates successfully.")
+
+            logger.info(f"Starting simulation steps for World {world_id}...")
+
+            # Locate the specific world
+            world = next(
+                (w for w in app.state.worlds if isinstance(w, World) and w.world_id == world_id),
+                None
+            )
+            if not world:
+                error_message = f"World with ID {world_id} not found."
+                add_log(error_message)
+                raise HTTPException(status_code=404, detail=error_message)
+
+            for step in range(request.steps):
+                if stop_signal:
+                    add_log("Simulation steps halted by stop signal.")
+                    break
+
+                # Perform simulation logic for the specific world
+                try:
+                    # Simulate world step
+                    await simulate_world_step(world)
+
+                    # Summarize state and submit to mTNN
+                    summary_vector = world.summarize_state()
+                    await submit_summary(world.world_id, summary_vector)
+
+                    # Log the summary
+                    add_log(f"World {world.world_id} summary: {summary_vector}")
+                except Exception as e:
+                    logger.error(f"Error processing World {world.world_id}: {str(e)}")
+                    add_log(f"Error processing World {world.world_id}: {str(e)}")
+
+                # Fetch entities for the specific world
+                entities = await get_entities_by_world(world.world_id)
+                logger.info(f"World {world.world_id}: Found {len(entities)} entities.")
+                add_log(f"World {world.world_id}: Found {len(entities)} entities.")
+
+                # Process incoming messages for each entity
+                for entity in entities:
+                    try:
+                        # Fetch the existing message field
+                        message = await redis.hget(f"entity:{nearby_entity['id']}", "message")
+
+                        if message:
+                            logger.info(f"Entity {entity.id} received message: {message}")
+                            add_log(f"Entity {entity.id} received message: {message}")
+
+                            # Optionally update memory or trigger actions based on the message
+                            updated_memory = f"{entity.memory}\nReceived: {message}"
+                            await redis.hset(f"entity:{entity.id}", "memory", updated_memory)
+
+                            # Clear the message field after processing (if required)
+                            await redis.hset(f"entity:{entity.id}", "message", "")
+                    except Exception as e:
+                        logger.error(f"Error processing message for Entity {entity.id}: {str(e)}")
+                        add_log(f"Error processing message for Entity {entity.id}: {str(e)}")
+
+                # Clear message queues only after processing all entities
+                for entity in entities:
+                    await redis.delete(f"entity:{entity.id}:messages")
+
+                # Message Generation
+                try:
+                    # Fetch nearby messages
+                    messages = await fetch_nearby_messages(world, entities)
+
+                    # Get the message generation prompt
+                    message_prompt = prompts.get("message_generation_prompt", DEFAULT_MESSAGE_GENERATION_PROMPT)
+
+                    # Construct and send the prompt to the LLM
+                    message_result = await send_llm_request(
+                        construct_prompt(message_prompt, world, messages)
+                    )
+
+                    # Process the result and save to Redis
+                    if message_result.get("message"):
+                        await redis.set(f"world:{world.world_id}:message", message_result["message"])
+                        add_log(f"Message generated for World {world.world_id}: \"{message_result['message']}\".")
+                except Exception as e:
+                    logger.error(f"Error generating message for World {world.world_id}: {str(e)}")
+                    add_log(f"Error generating message for World {world.world_id}: {str(e)}")
+
+                # Throttle requests to the LLM
+                await asyncio.sleep(REQUEST_DELAY)
+
+                # Memory Generation
+                try:
+                    # Fetch nearby messages
+                    messages = await fetch_nearby_messages(world, entities)
+
+                    # Get the memory generation prompt
+                    memory_prompt = prompts.get("memory_generation_prompt", DEFAULT_MEMORY_GENERATION_PROMPT)
+
+                    # Construct and send the prompt to the LLM
+                    memory_result = await send_llm_request(
+                        construct_prompt(memory_prompt, world, messages)
+                    )
+
+                    # Process the result and save to Redis
+                    if memory_result.get("memory"):
+                        await redis.set(f"world:{world.world_id}:memory", memory_result["memory"])
+                        add_log(f"Memory updated for World {world.world_id}: \"{memory_result['memory']}\".")
+                except Exception as e:
+                    logger.error(f"Error generating memory for World {world.world_id}: {str(e)}")
+                    add_log(f"Error generating memory for World {world.world_id}: {str(e)}")
+
+                # Throttle requests to the LLM
+                await asyncio.sleep(REQUEST_DELAY)
+
+                # Generate Movement (Per-Entity Processing)
+                for entity in entities:
+                    try:
+                        # Construct the movement prompt for the current entity
+                        movement_prompt = construct_prompt(
+                            prompts.get("movement_generation_prompt", DEFAULT_MOVEMENT_GENERATION_PROMPT),
+                            entity.dict(),
+                            []
+                        )
+
+                        # Send the prompt to the LLM for generating movement
+                        movement_result = await send_llm_request(movement_prompt)
+                        movement = movement_result.get("movement", "stay").strip()
+
+                        # Validate the movement response
+                        valid_movements = {"x+1", "x-1", "y+1", "y-1", "stay"}
+                        if movement not in valid_movements:
+                            movement = "stay"  # Default to "stay" if the response is invalid
+
+                        # Apply the movement to the entity
+                        initial_position = (entity.x, entity.y)
+                        if movement == "x+1":
+                            entity.x = (entity.x + 1) % GRID_SIZE
+                        elif movement == "x-1":
+                            entity.x = (entity.x - 1) % GRID_SIZE
+                        elif movement == "y+1":
+                            entity.y = (entity.y + 1) % GRID_SIZE
+                        elif movement == "y-1":
+                            entity.y = (entity.y - 1) % GRID_SIZE
+                        elif movement == "stay":
+                            logger.info(f"Entity {entity.id} stays in place at {initial_position}.")
+                            add_log(f"Entity {entity.id} stays in place at {initial_position}.")
+                            continue
+                        else:
+                            logger.warning(f"Invalid movement command for Entity {entity.id}: {movement}")
+                            add_log(f"Invalid movement command for Entity {entity.id}: {movement}")
+                            continue
+
+                        # Log and update position
+                        logger.info(f"Entity {entity.id} moved from {initial_position} to ({entity.x}, {entity.y}) with action '{movement}'.")
+                        add_log(f"Entity {entity.id} moved from {initial_position} to ({entity.x}, {entity.y}) with action '{movement}'.")
+
+                        # Update the entity's position in Redis
+                        await redis.hset(f"entity:{entity.id}", mapping={"x": entity.x, "y": entity.y})
+
+                    except Exception as e:
+                        logger.error(f"Error during movement generation for Entity {entity.id}: {str(e)}")
+                        add_log(f"Error during movement generation for Entity {entity.id}: {str(e)}")
+
+                    # Optional: Throttle requests to prevent overwhelming the LLM
+                    await asyncio.sleep(REQUEST_DELAY)
+
+            # Handle post-simulation steps
+            logger.info(f"Completed {request.steps} step(s) for World {world_id}.")
+            add_log(f"Simulation steps completed: {request.steps} step(s) for World {world_id}.")
+            return JSONResponse({"status": f"Performed {request.steps} step(s) for World {world_id}."})
+
+        except HTTPException as http_exc:
+            # Re-raise HTTP exceptions to be handled by the custom exception handler
+            raise http_exc
+        except Exception as e:
+            logger.error(f"Unexpected error during simulation steps: {str(e)}")
+            add_log(f"Unexpected error during simulation steps: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"An error occurred during simulation steps: {str(e)}")
+
+@app.post("/step", tags=["Simulation"])
 async def perform_steps(request: StepRequest):
     global stop_signal
     stop_signal = False  # Reset stop signal before starting steps
@@ -615,172 +1027,160 @@ async def perform_steps(request: StepRequest):
 
             # Perform simulation logic for the world
             for world in app.state.worlds:
-                await simulate_world_step(world)
+                if isinstance(world, World):
+                    try:
+                        # Simulate world step
+                        await simulate_world_step(world)
 
-                summary_vector = world.summarize_state()
-                await submit_summary(world.world_id, summary_vector)
+                        # Summarize state and submit to mTNN
+                        summary_vector = world.summarize_state()
+                        await submit_summary(world.world_id, summary_vector)
 
-                add_log(f"World {world.world_id} summary: {summary_vector}")
-
-            # Fetch all entity keys dynamically from Redis
-            entity_keys = await redis.keys("entity:*")  # Match all entity keys
-            if not entity_keys:
-                add_log("No entities found in Redis. Aborting simulation steps.")
-                return JSONResponse({"status": "No entities to process."})
-
-            logger.info(f"Step {step + 1}: Found {len(entity_keys)} entities.")
-            add_log(f"Step {step + 1}: Found {len(entity_keys)} entities.")
-
-            # Filter keys to ensure only valid hashes are processed
-            valid_entity_keys = []
-            for key in entity_keys:
-                key_type = await redis.type(key)
-                if key_type == "hash":
-                    valid_entity_keys.append(key)
+                        # Log the summary
+                        add_log(f"World {world.world_id} summary: {summary_vector}")
+                    except Exception as e:
+                        logger.error(f"Error processing world {world.world_id}: {str(e)}")
+                        add_log(f"Error processing world {world.world_id}: {str(e)}")
                 else:
-                    add_log(f"Skipping invalid key {key} of type {key_type}")
+                    logger.error(f"Invalid object in app.state.worlds: {type(world)}")
+                    add_log(f"Invalid object in app.state.worlds: {type(world)}")
 
-            # Fetch entity data from Redis for all valid keys
-            entities_data = await asyncio.gather(*[redis.hgetall(key) for key in valid_entity_keys])
-            entities = []
-            for entity_data in entities_data:
-                if entity_data:
-                    # Convert bytes to strings if necessary
-                    if isinstance(entity_data, dict):
-                        entity = {
-                            "id": int(entity_data.get("id", 0)),
-                            "name": entity_data.get("name", ""),
-                            "x": int(entity_data.get("x", 0)),
-                            "y": int(entity_data.get("y", 0)),
-                            "memory": entity_data.get("memory", "")
-                        }
-                        entities.append(entity)
-                    else:
-                        add_log(f"Invalid entity data: {entity_data}")
+            # Fetch entities per world
+            for world in app.state.worlds:
+                if isinstance(world, World):
+                    entities = await get_entities_by_world(world.world_id)
+                    logger.info(f"World {world.world_id}: Found {len(entities)} entities.")
+                    add_log(f"World {world.world_id}: Found {len(entities)} entities.")
 
-            logger.info(f"Processing {len(entities)} entities.")
-            add_log(f"Processing {len(entities)} entities for step {step + 1}.")
+                    # Process incoming messages for each entity
+                    for entity in entities:
+                        try:
+                            # Fetch the existing message field
+                            message = await redis.hget(f"entity:{entity['id']}", "message")
 
-            # Process incoming messages for each entity
-            for entity in entities:
-                try:
-                    # Fetch the existing message field
-                    message = await redis.hget(f"entity:{entity['id']}", "message")
+                            if message:
+                                logger.info(f"Entity {entity['id']} received message: {message}")
+                                add_log(f"Entity {entity['id']} received message: {message}")
 
-                    if message:
-                        logger.info(f"Entity {entity['id']} received message: {message}")
-                        add_log(f"Entity {entity['id']} received message: {message}")
+                                # Optionally update memory or trigger actions based on the message
+                                updated_memory = f"{entity['memory']} | Received: {message}"
+                                await redis.hset(f"entity:{entity['id']}", "memory", updated_memory)
 
-                        # Optionally update memory or trigger actions based on the message
-                        updated_memory = f"{entity['memory']} | Received: {message}"
-                        await redis.hset(f"entity:{entity['id']}", "memory", updated_memory)
+                                # Clear the message field after processing (if required)
+                                await redis.hset(f"entity:{entity['id']}", "message", "")
+                        except Exception as e:
+                            logger.error(f"Error processing message for Entity {entity['id']}: {str(e)}")
+                            add_log(f"Error processing message for Entity {entity['id']}: {str(e)}")
 
-                        # Clear the message field after processing (if required)
-                        await redis.hset(f"entity:{entity['id']}", "message", "")
-                except Exception as e:
-                    logger.error(f"Error processing message for Entity {entity['id']}: {str(e)}")
-                    add_log(f"Error processing message for Entity {entity['id']}: {str(e)}")
+                    # Clear message queues only after processing all entities
+                    for entity in entities:
+                        await redis.delete(f"entity:{entity['id']}:messages")
 
-            # Clear message queues only after processing all entities
-            for entity in entities:
-                await redis.delete(f"entity:{entity['id']}:messages")
+                    # Message Generation
+                    try:
+                        # Fetch nearby messages
+                        messages = await fetch_nearby_messages(world, entities)
 
-            # Message Generation
-            for entity in entities:
-                try:
-                    messages = await fetch_nearby_messages(entity, entities)
-                    message_prompt = prompts.get("message_generation_prompt", DEFAULT_MESSAGE_GENERATION_PROMPT)
-                    message_result = await send_llm_request(
-                        construct_prompt(message_prompt, entity, messages)
-                    )
-                    if "message" in message_result and message_result["message"]:
-                        await redis.hset(f"entity:{entity['id']}", "message", message_result["message"])
-                        add_log(f"Message generated for Entity {entity['id']}: {message_result['message']}")
-                except Exception as e:
-                    logger.error(f"Error generating message for Entity {entity['id']}: {str(e)}")
-                    add_log(f"Error generating message for Entity {entity['id']}: {str(e)}")
-                await asyncio.sleep(REQUEST_DELAY)
+                        # Get the message generation prompt
+                        message_prompt = prompts.get("message_generation_prompt", DEFAULT_MESSAGE_GENERATION_PROMPT)
 
-            if stop_signal:
-                logger.info("Stopping after message generation due to stop signal.")
-                add_log("Simulation steps halted after message generation by stop signal.")
-                break
+                        # Construct and send the prompt to the LLM
+                        message_result = await send_llm_request(
+                            construct_prompt(message_prompt, world, messages)
+                        )
 
-            # Memory Generation
-            for entity in entities:
-                try:
-                    messages = await fetch_nearby_messages(entity, entities)
-                    memory_prompt = prompts.get("memory_generation_prompt", DEFAULT_MEMORY_GENERATION_PROMPT)
-                    memory_result = await send_llm_request(
-                        construct_prompt(memory_prompt, entity, messages)
-                    )
-                    if "memory" in memory_result and memory_result["memory"]:
-                        await redis.hset(f"entity:{entity['id']}", "memory", memory_result["memory"])
-                        add_log(f"Memory updated for Entity {entity['id']}: {memory_result['memory']}")
-                except Exception as e:
-                    logger.error(f"Error generating memory for Entity {entity['id']}: {str(e)}")
-                    add_log(f"Error generating memory for Entity {entity['id']}: {str(e)}")
-                await asyncio.sleep(REQUEST_DELAY)
+                        # Process the result and save to Redis
+                        if "message" in message_result and message_result["message"]:
+                            await redis.set(f"world:{world.world_id}:message", message_result["message"])
+                            add_log(f"Message generated for World {world.world_id}: \"{message_result['message']}\".")
+                    except Exception as e:
+                        logger.error(f"Error generating message for World {world.world_id}: {str(e)}")
+                        add_log(f"Error generating message for World {world.world_id}: {str(e)}")
 
-            if stop_signal:
-                logger.info("Stopping after memory generation due to stop signal.")
-                add_log("Simulation steps halted after memory generation by stop signal.")
-                break
+                    # Throttle requests to the LLM
+                    await asyncio.sleep(REQUEST_DELAY)
 
-        # Generate Movement (Per-Entity Processing)
-        for entity in entities:
-            try:
-                # Construct the movement prompt for the current entity
-                movement_prompt = construct_prompt(
-                    prompts.get("movement_generation_prompt", DEFAULT_MOVEMENT_GENERATION_PROMPT),
-                    entity,
-                    []
-                )
+                    # Memory Generation
+                    try:
+                        # Fetch nearby messages
+                        messages = await fetch_nearby_messages(world, entities)
 
-                # Send the prompt to the LLM for generating movement
-                movement_result = await send_llm_request(movement_prompt)
-                movement = movement_result.get("movement", "stay").strip()
+                        # Get the memory generation prompt
+                        memory_prompt = prompts.get("memory_generation_prompt", DEFAULT_MEMORY_GENERATION_PROMPT)
 
-                # Validate the movement response
-                valid_movements = {"x+1", "x-1", "y+1", "y-1", "stay"}
-                if movement not in valid_movements:
-                    movement = "stay"  # Default to "stay" if the response is invalid
+                        # Construct and send the prompt to the LLM
+                        memory_result = await send_llm_request(
+                            construct_prompt(memory_prompt, world, messages)
+                        )
 
-                # Apply the movement to the entity
-                initial_position = (entity["x"], entity["y"])
-                if movement == "x+1":
-                    entity["x"] = (entity["x"] + 1) % GRID_SIZE
-                elif movement == "x-1":
-                    entity["x"] = (entity["x"] - 1) % GRID_SIZE
-                elif movement == "y+1":
-                    entity["y"] = (entity["y"] + 1) % GRID_SIZE
-                elif movement == "y-1":
-                    entity["y"] = (entity["y"] - 1) % GRID_SIZE
-                elif movement == "stay":
-                    logger.info(f"Entity {entity['id']} stays in place at {initial_position}.")
-                    add_log(f"Entity {entity['id']} stays in place at {initial_position}.")
-                    continue
-                else:
-                    logger.warning(f"Invalid movement command for Entity {entity['id']}: {movement}")
-                    add_log(f"Invalid movement command for Entity {entity['id']}: {movement}")
-                    continue
+                        # Process the result and save to Redis
+                        if "memory" in memory_result and memory_result["memory"]:
+                            await redis.set(f"world:{world.world_id}:memory", memory_result["memory"])
+                            add_log(f"Memory updated for World {world.world_id}: \"{memory_result['memory']}\".")
+                    except Exception as e:
+                        logger.error(f"Error generating memory for World {world.world_id}: {str(e)}")
+                        add_log(f"Error generating memory for World {world.world_id}: {str(e)}")
 
-                # Log and update position
-                logger.info(f"Entity {entity['id']} moved from {initial_position} to ({entity['x']}, {entity['y']}) with action '{movement}'.")
-                add_log(f"Entity {entity['id']} moved from {initial_position} to ({entity['x']}, {entity['y']}) with action '{movement}'.")
-                await redis.hset(f"entity:{entity['id']}", mapping={"x": entity["x"], "y": entity["y"]})
+                    # Throttle requests to the LLM
+                    await asyncio.sleep(REQUEST_DELAY)
 
-            except Exception as e:
-                logger.error(f"Error during movement generation for Entity {entity['id']}: {str(e)}")
-                add_log(f"Error during movement generation for Entity {entity['id']}: {str(e)}")
-            
-            # Optional: Throttle requests to prevent overwhelming the LLM
-            await asyncio.sleep(REQUEST_DELAY)
+                    # Generate Movement (Per-Entity Processing)
+                    for entity in entities:
+                        try:
+                            # Construct the movement prompt for the current entity
+                            movement_prompt = construct_prompt(
+                                prompts.get("movement_generation_prompt", DEFAULT_MOVEMENT_GENERATION_PROMPT),
+                                entity,
+                                []
+                            )
 
-        logger.info(f"Completed {request.steps} step(s).")
-        add_log(f"Simulation steps completed: {request.steps} step(s).")
-        return JSONResponse({"status": f"Performed {request.steps} step(s)."})
+                            # Send the prompt to the LLM for generating movement
+                            movement_result = await send_llm_request(movement_prompt)
+                            movement = movement_result.get("movement", "stay").strip()
 
+                            # Validate the movement response
+                            valid_movements = {"x+1", "x-1", "y+1", "y-1", "stay"}
+                            if movement not in valid_movements:
+                                movement = "stay"  # Default to "stay" if the response is invalid
+
+                            # Apply the movement to the entity
+                            initial_position = (entity["x"], entity["y"])
+                            if movement == "x+1":
+                                entity["x"] = (entity["x"] + 1) % GRID_SIZE
+                            elif movement == "x-1":
+                                entity["x"] = (entity["x"] - 1) % GRID_SIZE
+                            elif movement == "y+1":
+                                entity["y"] = (entity["y"] + 1) % GRID_SIZE
+                            elif movement == "y-1":
+                                entity["y"] = (entity["y"] - 1) % GRID_SIZE
+                            elif movement == "stay":
+                                logger.info(f"Entity {entity['id']} stays in place at {initial_position}.")
+                                add_log(f"Entity {entity['id']} stays in place at {initial_position}.")
+                                continue
+                            else:
+                                logger.warning(f"Invalid movement command for Entity {entity['id']}: {movement}")
+                                add_log(f"Invalid movement command for Entity {entity['id']}: {movement}")
+                                continue
+
+                            # Log and update position
+                            logger.info(f"Entity {entity['id']} moved from {initial_position} to ({entity['x']}, {entity['y']}) with action '{movement}'.")
+                            add_log(f"Entity {entity['id']} moved from {initial_position} to ({entity['x']}, {entity['y']}) with action '{movement}'.")
+
+                            # Update the entity's position in Redis
+                            await redis.hset(f"entity:{entity['id']}", mapping={"x": entity["x"], "y": entity["y"]})
+
+                        except Exception as e:
+                            logger.error(f"Error during movement generation for Entity {entity['id']}: {str(e)}")
+                            add_log(f"Error during movement generation for Entity {entity['id']}: {str(e)}")
+
+                        # Optional: Throttle requests to prevent overwhelming the LLM
+                        await asyncio.sleep(REQUEST_DELAY)
+
+            # Handle post-simulation steps
+            logger.info(f"Completed {request.steps} step(s).")
+            add_log(f"Simulation steps completed: {request.steps} step(s).")
+            return JSONResponse({"status": f"Performed {request.steps} step(s)."})
+        
     except Exception as e:
         logger.error(f"Unexpected error during simulation steps: {str(e)}")
         add_log(f"Unexpected error during simulation steps: {str(e)}")

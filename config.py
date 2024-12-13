@@ -1,10 +1,14 @@
 import os
 from dotenv import load_dotenv
-from models import SimulationSettings, PromptSettings, World
+from models import SimulationSettings, PromptSettings
 from typing import List, Dict
+import networkx as nx
 
 # Load environment variables
 load_dotenv()
+
+# Initialize an empty graph for dynamic connectivity
+CONNECTIVITY_GRAPH = nx.Graph()
 
 # Environment Variables
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -15,7 +19,7 @@ REDIS_ENDPOINT = "cute-crawdad-25113.upstash.io"
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
 
 # Simulation Configuration
-NUM_WORLDS = 1
+NUM_WORLDS = 4
 GRID_SIZE = 30
 NUM_ENTITIES = 10
 MAX_STEPS = 100
@@ -45,12 +49,17 @@ Based on this, decide your next move. Please choose one of the following options
 Respond with a single action corresponding to your next move. No extra text.
 """
 
-# Number of Worlds
-NUM_WORLDS = int(os.getenv("NUM_WORLDS", 1))  # Default to 1 if not set
 
-# mTNN API Endpoint
 #MTNN_API_ENDPOINT = os.getenv("MTNN_API_ENDPOINT")
 MTNN_API_ENDPOINT = "http://localhost:8000/mtnn/submit_summary"
+
+DEFAULT_WORLD_SETTINGS = {
+    "task_priorities": {"default_task": 1.0},
+    "agent_behaviors": {"cooperation": 0.5},
+    "resource_allocation": {"default_resource": 100},
+    "environment_changes": {"scarcity_level": 0.2},
+}
+
 
 # Environment variables for logs
 LOG_DIR = os.getenv("LOG_DIR", "/var/log/myapp")  # Default directory if not specified
