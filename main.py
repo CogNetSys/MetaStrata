@@ -42,7 +42,7 @@ MAX_CONCURRENT_REQUESTS = 1  # Limit concurrent requests to prevent rate limitin
 # Define the configuration model
 class SimulationSettings(BaseModel):
     grid_size: int = GRID_SIZE
-    num_agents: int = NUM_AGENTS
+    num_entities: int = NUM_AGENTS
     max_steps: int = MAX_STEPS
     chebyshev_distance: int = CHEBYSHEV_DISTANCE
     llm_model: str = LLM_MODEL
@@ -54,7 +54,7 @@ class SimulationSettings(BaseModel):
 # Simulation Settings Model
 class SimulationSettings(BaseModel):
     grid_size: int = 30
-    num_agents: int = 10
+    num_entities: int = 10
     max_steps: int = 100
     chebyshev_distance: int = 5
     llm_model: str = "llama-3.2-11b-vision-preview"
@@ -69,13 +69,13 @@ class PromptSettings(BaseModel):
     memory_generation_prompt: str
     movement_generation_prompt: str
 
-# Agent Model (Pydantic)
-class Agent(BaseModel):
+# Entity Model (Pydantic)
+class Entity(BaseModel):
     id: int
     name: str
     x: int
     y: int
-    memory: str = ""  # Default empty memory for new agents
+    memory: str = ""  # Default empty memory for new entities
 
 # Redis & Supabase Initialization
 redis = Redis(
@@ -97,7 +97,7 @@ global_request_semaphore = Semaphore(MAX_CONCURRENT_REQUESTS)
 # Stop signal
 stop_signal = False
 
-# Fetching Neraby Agents Function
+# Fetching Neraby Entities Function
 def chebyshev_distance(x1, y1, x2, y2):
     return max(abs(x1 - x2), abs(y1 - y2))
 
@@ -106,21 +106,21 @@ GRID_DESCRIPTION = "You are in a field with periodic boundary conditions with ot
 
 DEFAULT_MESSAGE_GENERATION_PROMPT = """
 [INST]
-You are being{agentId} at position ({x}, {y}). {grid_description} You have a summary memory of the situation so far: {memory}. You received messages from the surrounding beings: {messages}. Based on the above, you send a message to the surrounding beings. Your message will reach beings up to distance {distance} away. What message do you send?
+You are being{entityId} at position ({x}, {y}). {grid_description} You have a summary memory of the situation so far: {memory}. You received messages from the surrounding beings: {messages}. Based on the above, you send a message to the surrounding beings. Your message will reach beings up to distance {distance} away. What message do you send?
 Respond with only the message content, and nothing else.
 [/INST]
 """
 
 DEFAULT_MEMORY_GENERATION_PROMPT = """
 [INST]
-You are being{agentId} at position ({x}, {y}). {grid_description} You have a summary memory of the situation so far: {memory}. You received messages from the surrounding beings: {messages}. Based on the above, summarize the situation you and the other beings have been in so far for you to remember.
+You are being{entityId} at position ({x}, {y}). {grid_description} You have a summary memory of the situation so far: {memory}. You received messages from the surrounding beings: {messages}. Based on the above, summarize the situation you and the other beings have been in so far for you to remember.
 Respond with only the summary, and nothing else.
 [/INST]
 """
 
 DEFAULT_MOVEMENT_GENERATION_PROMPT = """
 [INST]
-You are being{agentId} at position ({x}, {y}). {grid_description} You have a summary memory of the situation so far: {memory}.
+You are being{entityId} at position ({x}, {y}). {grid_description} You have a summary memory of the situation so far: {memory}.
 Based on the above, choose your next move. Respond with only one of the following options, and nothing else: "x+1", "x-1", "y+1", "y-1", or "stay".
 Do not provide any explanation or additional text.
 [/INST]
@@ -136,11 +136,11 @@ def chebyshev_distance(x1, y1, x2, y2):
     dy = min(abs(y1 - y2), GRID_SIZE - abs(y1 - y2))
     return max(dx, dy)
 
-def construct_prompt(template, agent, messages):
+def construct_prompt(template, entity, messages):
     messages_str = "\n".join(messages) if messages else "No recent messages."
-    memory = agent.get("memory", "No prior memory.")
+    memory = entity.get("memory", "No prior memory.")
     return template.format(
-        agentId=agent["id"], x=agent["x"], y=agent["y"],
+        entityId=entity["id"], x=entity["x"], y=entity["y"],
         grid_description=GRID_DESCRIPTION, memory=memory,
         messages=messages_str, distance=CHEBYSHEV_DISTANCE
     )
@@ -155,7 +155,7 @@ async def fetch_prompts_from_fastapi():
             logger.warning("Failed to fetch prompts, using default ones.")
             return {}  # Return an empty dict to trigger the default prompts
         
-# Chebyshev Distance Helper Function for calculating the distance for Nearby Agents function.
+# Chebyshev Distance Helper Function for calculating the distance for Nearby Entities function.
 def chebyshev_distance(x1, y1, x2, y2):
     return max(abs(x1 - x2), abs(y1 - y2))
         
@@ -230,32 +230,32 @@ async def send_llm_request(prompt, max_retries=3, base_delay=2):
                 logger.error(f"Error during LLM request: {e}")
                 return {"message": "", "memory": "", "movement": "stay"}
 
-async def initialize_agents():
+async def initialize_entities():
     logger.info("Resetting simulation state.")
-    supabase.table("movements").delete().neq("agent_id", -1).execute()
+    supabase.table("movements").delete().neq("entity_id", -1).execute()
     supabase.table("entities").delete().neq("id", -1).execute()
 
-    agents = [
+    entities = [
         {
             "id": i,
-            "name": f"Agent-{i}",
+            "name": f"Entity-{i}",
             "x": random.randint(0, GRID_SIZE - 1),
             "y": random.randint(0, GRID_SIZE - 1),
             "memory": ""
         }
         for i in range(NUM_AGENTS)
     ]
-    supabase.table("entities").insert(agents).execute()
-    for agent in agents:
-        await redis.hset(f"agent:{agent['id']}", mapping=agent)
-    logger.info("Agents initialized.")
-    return agents
+    supabase.table("entities").insert(entities).execute()
+    for entity in entities:
+        await redis.hset(f"entity:{entity['id']}", mapping=entity)
+    logger.info("Entities initialized.")
+    return entities
 
-async def fetch_nearby_messages(agent, agents):
-    nearby_agents = [
-        a for a in agents if a["id"] != agent["id"] and chebyshev_distance(agent["x"], agent["y"], a["x"], a["y"]) <= CHEBYSHEV_DISTANCE
+async def fetch_nearby_messages(entity, entities):
+    nearby_entities = [
+        a for a in entities if a["id"] != entity["id"] and chebyshev_distance(entity["x"], entity["y"], a["x"], a["y"]) <= CHEBYSHEV_DISTANCE
     ]
-    messages = [await redis.hget(f"agent:{a['id']}", "message") for a in nearby_agents]
+    messages = [await redis.hget(f"entity:{a['id']}", "message") for a in nearby_entities]
     return [m for m in messages if m]
 
 # Lifespan Context Manager
@@ -390,15 +390,15 @@ async def reset_simulation():
     global stop_signal
     stop_signal = False  # Reset stop signal before starting
     await redis.flushdb()
-    agents = await initialize_agents()
-    return JSONResponse({"status": "Simulation reset successfully.", "agents": agents})
+    entities = await initialize_entities()
+    return JSONResponse({"status": "Simulation reset successfully.", "entities": entities})
 
 @app.post("/start")
 async def start_simulation():
     global stop_signal
     stop_signal = False  # Reset stop signal before starting
-    agents = await initialize_agents()
-    return JSONResponse({"status": "Simulation started successfully.", "agents": agents})
+    entities = await initialize_entities()
+    return JSONResponse({"status": "Simulation started successfully.", "entities": entities})
 
 @app.post("/step")
 async def perform_steps(request: StepRequest):
@@ -408,15 +408,15 @@ async def perform_steps(request: StepRequest):
     # Fetch the current prompt templates from FastAPI
     prompts = await fetch_prompts_from_fastapi()
 
-    agents = [
+    entities = [
         {
-            "id": int(agent["id"]),
-            "name": agent["name"],
-            "x": int(agent["x"]),
-            "y": int(agent["y"]),
-            "memory": agent.get("memory", "")
+            "id": int(entity["id"]),
+            "name": entity["name"],
+            "x": int(entity["x"]),
+            "y": int(entity["y"]),
+            "memory": entity.get("memory", "")
         }
-        for agent in [await redis.hgetall(f"agent:{i}") for i in range(NUM_AGENTS)]
+        for entity in [await redis.hgetall(f"entity:{i}") for i in range(NUM_AGENTS)]
     ]
 
     for _ in range(request.steps):
@@ -430,19 +430,19 @@ async def perform_steps(request: StepRequest):
         movement_prompt = prompts.get("movement_generation_prompt", DEFAULT_MOVEMENT_GENERATION_PROMPT)
 
         # Message Generation
-        for agent in agents:
+        for entity in entities:
             message_result = await send_llm_request(
                 message_prompt.format(
-                    agentId=agent["id"], x=agent["x"], y=agent["y"],
+                    entityId=entity["id"], x=entity["x"], y=entity["y"],
                     grid_description=GRID_DESCRIPTION,
-                    memory=agent["memory"], messages="".join(await fetch_nearby_messages(agent, agents)),
+                    memory=entity["memory"], messages="".join(await fetch_nearby_messages(entity, entities)),
                     distance=CHEBYSHEV_DISTANCE
                 )
             )
             if "message" not in message_result:
-                logger.warning(f"Skipping message update for Agent {agent['id']} due to invalid response.")
+                logger.warning(f"Skipping message update for Entity {entity['id']} due to invalid response.")
                 continue
-            await redis.hset(f"agent:{agent['id']}", "message", message_result.get("message", ""))
+            await redis.hset(f"entity:{entity['id']}", "message", message_result.get("message", ""))
             await asyncio.sleep(REQUEST_DELAY)
 
         if stop_signal:
@@ -450,19 +450,19 @@ async def perform_steps(request: StepRequest):
             break
 
         # Memory Generation
-        for agent in agents:
+        for entity in entities:
             memory_result = await send_llm_request(
                 memory_prompt.format(
-                    agentId=agent["id"], x=agent["x"], y=agent["y"],
+                    entityId=entity["id"], x=entity["x"], y=entity["y"],
                     grid_description=GRID_DESCRIPTION,
-                    memory=agent["memory"], messages="".join(await fetch_nearby_messages(agent, agents)),
+                    memory=entity["memory"], messages="".join(await fetch_nearby_messages(entity, entities)),
                     distance=CHEBYSHEV_DISTANCE
                 )
             )
             if "memory" not in memory_result:
-                logger.warning(f"Skipping memory update for Agent {agent['id']} due to invalid response.")
+                logger.warning(f"Skipping memory update for Entity {entity['id']} due to invalid response.")
                 continue
-            await redis.hset(f"agent:{agent['id']}", "memory", memory_result.get("memory", agent["memory"]))
+            await redis.hset(f"entity:{entity['id']}", "memory", memory_result.get("memory", entity["memory"]))
             await asyncio.sleep(REQUEST_DELAY)
 
         if stop_signal:
@@ -470,41 +470,41 @@ async def perform_steps(request: StepRequest):
             break
 
         # Movement Generation
-        for agent in agents:
+        for entity in entities:
             movement_result = await send_llm_request(
                 movement_prompt.format(
-                    agentId=agent["id"], x=agent["x"], y=agent["y"],
+                    entityId=entity["id"], x=entity["x"], y=entity["y"],
                     grid_description=GRID_DESCRIPTION,
-                    memory=agent["memory"], messages="".join(await fetch_nearby_messages(agent, agents)),
+                    memory=entity["memory"], messages="".join(await fetch_nearby_messages(entity, entities)),
                     distance=CHEBYSHEV_DISTANCE
                 )
             )
             if "movement" not in movement_result:
-                logger.warning(f"Skipping movement update for Agent {agent['id']} due to invalid response.")
+                logger.warning(f"Skipping movement update for Entity {entity['id']} due to invalid response.")
                 continue
 
             # Apply movement logic
             movement = movement_result.get("movement", "stay").strip().lower()
-            initial_position = (agent["x"], agent["y"])
+            initial_position = (entity["x"], entity["y"])
 
             if movement == "x+1":
-                agent["x"] = (agent["x"] + 1) % GRID_SIZE
+                entity["x"] = (entity["x"] + 1) % GRID_SIZE
             elif movement == "x-1":
-                agent["x"] = (agent["x"] - 1) % GRID_SIZE
+                entity["x"] = (entity["x"] - 1) % GRID_SIZE
             elif movement == "y+1":
-                agent["y"] = (agent["y"] + 1) % GRID_SIZE
+                entity["y"] = (entity["y"] + 1) % GRID_SIZE
             elif movement == "y-1":
-                agent["y"] = (agent["y"] - 1) % GRID_SIZE
+                entity["y"] = (entity["y"] - 1) % GRID_SIZE
             elif movement == "stay":
-                logger.info(f"Agent {agent['id']} stays in place at {initial_position}.")
+                logger.info(f"Entity {entity['id']} stays in place at {initial_position}.")
                 continue  # No update needed for stay
             else:
-                logger.warning(f"Invalid movement command for Agent {agent['id']}: {movement}")
+                logger.warning(f"Invalid movement command for Entity {entity['id']}: {movement}")
                 continue  # Skip invalid commands
 
             # Log and update position
-            logger.info(f"Agent {agent['id']} moved from {initial_position} to ({agent['x']}, {agent['y']}) with action '{movement}'.")
-            await redis.hset(f"agent:{agent['id']}", mapping={"x": agent["x"], "y": agent["y"]})
+            logger.info(f"Entity {entity['id']} moved from {initial_position} to ({entity['x']}, {entity['y']}) with action '{movement}'.")
+            await redis.hset(f"entity:{entity['id']}", mapping={"x": entity["x"], "y": entity["y"]})
             await asyncio.sleep(REQUEST_DELAY)
 
     return JSONResponse({"status": f"Performed {request.steps} step(s)."})
@@ -516,112 +516,112 @@ async def stop_simulation():
     logger.info("Stop signal triggered.")
     return JSONResponse({"status": "Simulation stopping."})
 
-@app.post("/agents", response_model=Agent)
-async def create_agent(agent: Agent):
-    # Create agent data in Redis
-    await redis.hset(f"agent:{agent.id}", mapping=agent.dict())
+@app.post("/entities", response_model=Entity)
+async def create_entity(entity: Entity):
+    # Create entity data in Redis
+    await redis.hset(f"entity:{entity.id}", mapping=entity.dict())
     
-    # Optionally, store agent in Supabase for persistent storage
-    supabase.table("entities").insert(agent.dict()).execute()
+    # Optionally, store entity in Supabase for persistent storage
+    supabase.table("entities").insert(entity.dict()).execute()
     
-    return agent
+    return entity
 
-@app.get("/agents/{agent_id}", response_model=Agent)
-async def get_agent(agent_id: int):
-    # Fetch agent data from Redis
-    agent_data = await redis.hgetall(f"agent:{agent_id}")
-    if not agent_data:
-        raise HTTPException(status_code=404, detail="Agent not found")
+@app.get("/entities/{entity_id}", response_model=Entity)
+async def get_entity(entity_id: int):
+    # Fetch entity data from Redis
+    entity_data = await redis.hgetall(f"entity:{entity_id}")
+    if not entity_data:
+        raise HTTPException(status_code=404, detail="Entity not found")
     
-    # Convert Redis data into an Agent model (ensure proper types are cast)
-    agent = Agent(
-        id=agent_id,
-        name=agent_data.get("name"),
-        x=int(agent_data.get("x")),
-        y=int(agent_data.get("y")),
-        memory=agent_data.get("memory", "")
+    # Convert Redis data into an Entity model (ensure proper types are cast)
+    entity = Entity(
+        id=entity_id,
+        name=entity_data.get("name"),
+        x=int(entity_data.get("x")),
+        y=int(entity_data.get("y")),
+        memory=entity_data.get("memory", "")
     )
-    return agent
+    return entity
 
-@app.put("/agents/{agent_id}", response_model=Agent)
-async def update_agent(agent_id: int, agent: Agent):
-    # Update agent data in Redis (assuming 'hset' is used to update fields)
-    await redis.hset(f"agent:{agent_id}", mapping=agent.dict())
+@app.put("/entities/{entity_id}", response_model=Entity)
+async def update_entity(entity_id: int, entity: Entity):
+    # Update entity data in Redis (assuming 'hset' is used to update fields)
+    await redis.hset(f"entity:{entity_id}", mapping=entity.dict())
     
-    # Optionally, update agent in Supabase for persistent storage
-    supabase.table("entities").update(agent.dict()).eq("id", agent_id).execute()
+    # Optionally, update entity in Supabase for persistent storage
+    supabase.table("entities").update(entity.dict()).eq("id", entity_id).execute()
     
-    return agent
+    return entity
 
-@app.post("/agents/{agent_id}/send_message")
-async def send_message(agent_id: int, message: str):
-    # Get the agent's current position and details
-    agent_data = await redis.hgetall(f"agent:{agent_id}")
-    if not agent_data:
-        raise HTTPException(status_code=404, detail="Agent not found")
+@app.post("/entities/{entity_id}/send_message")
+async def send_message(entity_id: int, message: str):
+    # Get the entity's current position and details
+    entity_data = await redis.hgetall(f"entity:{entity_id}")
+    if not entity_data:
+        raise HTTPException(status_code=404, detail="Entity not found")
     
-    # Save the message in Redis for the agent
-    await redis.hset(f"agent:{agent_id}", "message", message)
+    # Save the message in Redis for the entity
+    await redis.hset(f"entity:{entity_id}", "message", message)
     
     return {"status": "Message sent successfully", "message": message}
 
-@app.delete("/agents/{agent_id}")
-async def delete_agent(agent_id: int):
-    # Delete agent from Redis
-    await redis.delete(f"agent:{agent_id}")
+@app.delete("/entities/{entity_id}")
+async def delete_entity(entity_id: int):
+    # Delete entity from Redis
+    await redis.delete(f"entity:{entity_id}")
     
-    # Optionally, delete agent from Supabase
-    supabase.table("entities").delete().eq("id", agent_id).execute()
+    # Optionally, delete entity from Supabase
+    supabase.table("entities").delete().eq("id", entity_id).execute()
     
-    return {"status": "Agent deleted successfully"}
+    return {"status": "Entity deleted successfully"}
 
-@app.get("/agents/{agent_id}/nearby", response_model=List[Agent])
-async def get_nearby_agents(agent_id: int):
-    # Get the agent's position from Redis
-    agent_data = await redis.hgetall(f"agent:{agent_id}")
-    if not agent_data:
-        raise HTTPException(status_code=404, detail="Agent not found")
+@app.get("/entities/{entity_id}/nearby", response_model=List[Entity])
+async def get_nearby_entities(entity_id: int):
+    # Get the entity's position from Redis
+    entity_data = await redis.hgetall(f"entity:{entity_id}")
+    if not entity_data:
+        raise HTTPException(status_code=404, detail="Entity not found")
 
-    agent = Agent(**agent_data)
+    entity = Entity(**entity_data)
     
-    # Fetch all agents except the current one
-    all_agents = []
+    # Fetch all entities except the current one
+    all_entities = []
     for i in range(NUM_AGENTS):
-        if i != agent_id:
-            agent_info = await redis.hgetall(f"agent:{i}")
-            if agent_info and all(key in agent_info for key in ["id", "name", "x", "y"]):
-                all_agents.append(Agent(**agent_info))
+        if i != entity_id:
+            entity_info = await redis.hgetall(f"entity:{i}")
+            if entity_info and all(key in entity_info for key in ["id", "name", "x", "y"]):
+                all_entities.append(Entity(**entity_info))
             else:
-                logger.warning(f"Missing or incomplete data for agent {i}. Skipping.")
+                logger.warning(f"Missing or incomplete data for entity {i}. Skipping.")
     
-    # Filter nearby agents based on Chebyshev distance
-    nearby_agents = [
-        a for a in all_agents
-        if chebyshev_distance(agent.x, agent.y, a.x, a.y) <= CHEBYSHEV_DISTANCE
+    # Filter nearby entities based on Chebyshev distance
+    nearby_entities = [
+        a for a in all_entities
+        if chebyshev_distance(entity.x, entity.y, a.x, a.y) <= CHEBYSHEV_DISTANCE
     ]
     
-    return nearby_agents
+    return nearby_entities
 
-@app.post("/sync_agents")
-async def sync_agents():
-    all_agents = []
+@app.post("/sync_entities")
+async def sync_entities():
+    all_entities = []
     for i in range(NUM_AGENTS):
-        agent_data = await redis.hgetall(f"agent:{i}")
-        if agent_data and all(key in agent_data for key in ["id", "name", "x", "y"]):
-            all_agents.append(Agent(**agent_data))
+        entity_data = await redis.hgetall(f"entity:{i}")
+        if entity_data and all(key in entity_data for key in ["id", "name", "x", "y"]):
+            all_entities.append(Entity(**entity_data))
         else:
-            logger.warning(f"Missing or incomplete data for agent {i}. Skipping.")
+            logger.warning(f"Missing or incomplete data for entity {i}. Skipping.")
     
-    for agent in all_agents:
-        supabase.table("entities").upsert(agent.dict()).execute()
+    for entity in all_entities:
+        supabase.table("entities").upsert(entity.dict()).execute()
     
-    return {"status": "Agents synchronized between Redis and Supabase"}
+    return {"status": "Entities synchronized between Redis and Supabase"}
 
 @app.get("/settings", response_model=SimulationSettings)
 async def get_settings():
     return SimulationSettings(
         grid_size=GRID_SIZE,
-        num_agents=NUM_AGENTS,
+        num_entities=NUM_AGENTS,
         max_steps=MAX_STEPS,
         chebyshev_distance=CHEBYSHEV_DISTANCE,
         llm_model=LLM_MODEL,
@@ -637,7 +637,7 @@ async def set_settings(settings: SimulationSettings):
     global LLM_MAX_TOKENS, LLM_TEMPERATURE, REQUEST_DELAY, MAX_CONCURRENT_REQUESTS
 
     GRID_SIZE = settings.grid_size
-    NUM_AGENTS = settings.num_agents
+    NUM_AGENTS = settings.num_entities
     MAX_STEPS = settings.max_steps
     CHEBYSHEV_DISTANCE = settings.chebyshev_distance
     LLM_MODEL = settings.llm_model

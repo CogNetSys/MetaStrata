@@ -4,24 +4,24 @@
 
 #### Description of Software
 
-This project implements an enhanced version of the **Takata et al. experiment** as described in their [research paper](https://arxiv.org/pdf/2411.03252). It simulates autonomous agents moving in a grid, exchanging messages, and building memories based on their surroundings.
+This project implements an enhanced version of the **Takata et al. experiment** as described in their [research paper](https://arxiv.org/pdf/2411.03252). It simulates autonomous entities moving in a grid, exchanging messages, and building memories based on their surroundings.
 
 The application is built using **Python** with **FastAPI**, uses **Supabase** as the database, and **Redis** for caching. It uses Groq Cloud for super fast LLM model inference speeds. It also includes a WebSocket client for interactive logging.
 
 #### Description of Experiment
 
-Explore the spontaneous emergence of individuality, social norms, and collective intelligence in multi-agent systems powered by Large Language Models (LLMs). This project replicates and extends the groundbreaking work from the paper "Spontaneous Emergence of Agent Individuality Through Social Interactions in LLM-Based Communities" by Ryosuke Takata et al.
+Explore the spontaneous emergence of individuality, social norms, and collective intelligence in multi-entity systems powered by Large Language Models (LLMs). This project replicates and extends the groundbreaking work from the paper "Spontaneous Emergence of Entity Individuality Through Social Interactions in LLM-Based Communities" by Ryosuke Takata et al.
 
-With agents starting from a uniform state, this simulation demonstrates how personalities, emotions, and behaviors evolve organically through cooperative communication. Using Supabase and Redis, the application implements a grid-based environment where agents interact via natural language, generating insights into emergent phenomena such as hashtags, hallucinations, and shared narratives.
+With entities starting from a uniform state, this simulation demonstrates how personalities, emotions, and behaviors evolve organically through cooperative communication. Using Supabase and Redis, the application implements a grid-based environment where entities interact via natural language, generating insights into emergent phenomena such as hashtags, hallucinations, and shared narratives.
 
 ---
 
 ## 🌟 Features
 
-- **No predefined individuality:** Agents begin as homogeneous entities, with unique traits emerging through interaction.
+- **No predefined individuality:** Entities begin as homogeneous entities, with unique traits emerging through interaction.
 - **Emergent phenomena:** Witness the rise of shared norms, emotional synchronicity, and creative hallucinations in a simulated community.
 - **Scalable architecture:** Built on Python's FastAPI, with Supabase for persistence and Redis for caching, ensuring efficient simulation management.
-- **Research-focused:** A platform for studying the dynamics of collective intelligence and individuality in LLM-based agent communities.
+- **Research-focused:** A platform for studying the dynamics of collective intelligence and individuality in LLM-based entity communities.
 
 ---
 
@@ -119,9 +119,9 @@ The application will be available at `http://localhost:8000`.
 
 ## 💡 Usage
 
-- Use the **Redis `MONITOR`** feature to view live logs of agent **messages**, **memories**, and **movements**.
+- Use the **Redis `MONITOR`** feature to view live logs of entity **messages**, **memories**, and **movements**.
 - Reset or initialize the simulation using `/reset` and `/start` endpoints.
-- Execute steps with `/step` to observe agent behavior.
+- Execute steps with `/step` to observe entity behavior.
 
 ---
 
@@ -156,7 +156,7 @@ The application will be available at `http://localhost:8000`.
 
 ## ⚙️ Redis Monitoring
 
-Run the following command to view real-time agent logs:
+Run the following command to view real-time entity logs:
 
 ```bash
 redis-cli monitor
@@ -176,4 +176,4 @@ This project is licensed under the MIT License.
 
 ---
 
-### 🎉 Enjoy exploring agent behaviors and distributed simulations!
+### 🎉 Enjoy exploring entity behaviors and distributed simulations!
