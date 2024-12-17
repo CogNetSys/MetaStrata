@@ -1,32 +1,24 @@
 import os
 import random
-import asyncio
-import time
-from typing import List, Dict
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, HTMLResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi import FastAPI
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from redis.asyncio import Redis
 from supabase import create_client, Client
 import httpx
 import logging
-from asyncio import Semaphore
-from contextlib import asynccontextmanager
-from typing import List
-from fastapi.middleware.cors import CORSMiddleware
 import json
-from datetime import datetime
-from fastapi.openapi.docs import get_swagger_ui_html
+import queue
+import threading
+from contextlib import asynccontextmanager
+from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
 # Environment Variables
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-REDIS_ENDPOINT = "cute-crawdad-25113.upstash.io"
+REDIS_ENDPOINT = os.getenv("REDIS_ENDPOINT")
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
 
 # Environment Variables
@@ -95,9 +87,42 @@ redis = Redis(
 )
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Logging Configuration
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("simulation_app")
+# **Dynamic Log Level Configuration from Environment**
+log_level = os.getenv('LOG_LEVEL', 'INFO').upper()  # Can be 'DEBUG', 'INFO', 'ERROR', etc.
+logger = logging.getLogger('simulation_app')
+logger.setLevel(log_level)
+
+# **Structured Logging (JSON Format)**
+class JsonLogger(logging.Handler):
+    def emit(self, record):
+        log_entry = self.format(record)
+        print(log_entry)  # You can replace this with sending to a file or log system
+
+json_handler = JsonLogger()
+json_formatter = logging.Formatter(
+    '{"timestamp": "%(asctime)s", "level": "%(levelname)s", "message": "%(message)s", "module": "%(module)s", "line": "%(lineno)d"}')
+json_handler.setFormatter(json_formatter)
+logger.addHandler(json_handler)
+
+# **Asynchronous Logging**
+log_queue = queue.Queue()
+
+class AsyncLogHandler(logging.Handler):
+    def emit(self, record):
+        log_queue.put(self.format(record))
+
+async_handler = AsyncLogHandler()
+async_formatter = logging.Formatter('%(asctime)s - %(message)s')
+async_handler.setFormatter(async_formatter)
+logger.addHandler(async_handler)
+
+def log_listener():
+    while True:
+        log_entry = log_queue.get()
+        print(log_entry)  # Replace with your actual log forwarding
+
+# Start listener thread for async logging
+threading.Thread(target=log_listener, daemon=True).start()
 
 # Stop signal
 stop_signal = False
@@ -107,41 +132,41 @@ def chebyshev_distance(x1, y1, x2, y2):
     return max(abs(x1 - x2), abs(y1 - y2))
 
 async def initialize_entities():
-    logger.info("Resetting simulation state.")
-    supabase.table("movements").delete().neq("entity_id", -1).execute()
-    supabase.table("entities").delete().neq("id", -1).execute()
+    logger.info('Resetting simulation state.')
+    supabase.table('movements').delete().neq('entity_id', -1).execute()
+    supabase.table('entities').delete().neq('id', -1).execute()
 
     entities = [
         {
-            "id": i,
-            "name": f"Entity-{i}",
-            "x": random.randint(0, GRID_SIZE - 1),
-            "y": random.randint(0, GRID_SIZE - 1),
-            "memory": ""
+            'id': i,
+            'name': f'Entity-{i}',
+            'x': random.randint(0, GRID_SIZE - 1),
+            'y': random.randint(0, GRID_SIZE - 1),
+            'memory': ''
         }
         for i in range(NUM_ENTITIES)
     ]
-    supabase.table("entities").insert(entities).execute()
+    supabase.table('entities').insert(entities).execute()
     for entity in entities:
-        await redis.hset(f"entity:{entity['id']}", mapping=entity)
-    logger.info("Entities initialized.")
+        await redis.hset(f'entity:{entity["id"]}', mapping=entity)
+    logger.info('Entities initialized.')
     return entities
 
 async def fetch_nearby_messages(entity, entities):
     nearby_entities = [
-        a for a in entities if a["id"] != entity["id"] and chebyshev_distance(entity["x"], entity["y"], a["x"], a["y"]) <= CHEBYSHEV_DISTANCE
+        a for a in entities if a['id'] != entity['id'] and chebyshev_distance(entity['x'], entity['y'], a['x'], a['y']) <= CHEBYSHEV_DISTANCE
     ]
-    messages = [await redis.hget(f"entity:{a['id']}", "message") for a in nearby_entities]
+    messages = [await redis.hget(f'entity:{a["id"]}', 'message') for a in nearby_entities]
     return [m for m in messages if m]
 
 # Helper function to fetch Prompts from FastAPI
 async def fetch_prompts_from_fastapi():
     async with httpx.AsyncClient() as client:
-        response = await client.get("http://localhost:8000/api/prompts")
+        response = await client.get('http://localhost:8000/api/prompts')
         if response.status_code == 200:
             return response.json()  # Return the fetched prompts
         else:
-            logger.warning("Failed to fetch prompts, using default ones.")
+            logger.warning('Failed to fetch prompts, using default ones.')
             return {}  # Return an empty dict to trigger the default prompts
 
 from app.endpoints.api import router as api_router
@@ -150,18 +175,18 @@ from app.endpoints.api import router as api_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global stop_signal
-    logger.info("Starting application lifespan...")
+    logger.info('Starting application lifespan...')
     try:
         # Startup logic
         await redis.ping()
-        logger.info("Redis connection established.")       
+        logger.info('Redis connection established.')       
         yield
     finally:
         # Shutdown logic
-        logger.info("Shutting down application...")
+        logger.info('Shutting down application...')
         stop_signal = True  # Ensure simulation stops if running
         await redis.close()
-        logger.info("Redis connection closed.")
+        logger.info('Redis connection closed.')
 
 # Create FastAPI app with lifespan
 app = FastAPI(
@@ -173,10 +198,10 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins or specify your frontend's URL
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.include_router(api_router, prefix="/api", tags=["simulation"])
+app.include_router(api_router, prefix='/api', tags=['simulation'])

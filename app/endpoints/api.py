@@ -1,8 +1,6 @@
 import asyncio
 import logging
-import os
-import random
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException
 from typing import List
 from fastapi.responses import JSONResponse
 import httpx
@@ -12,12 +10,8 @@ from pydantic import BaseModel
 from app.main import StepRequest, chebyshev_distance, redis, logger, supabase, initialize_entities, fetch_prompts_from_fastapi, fetch_nearby_messages
 
 from app.main import (
-    SUPABASE_URL,
-    SUPABASE_KEY,
     GROQ_API_KEY,
     GROQ_API_ENDPOINT,
-    REDIS_ENDPOINT,
-    REDIS_PASSWORD,
     GRID_SIZE,
     NUM_ENTITIES,
     MAX_STEPS,
