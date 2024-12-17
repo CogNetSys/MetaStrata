@@ -431,17 +431,3 @@ async def set_prompts(prompts: PromptSettings):
     DEFAULT_MOVEMENT_GENERATION_PROMPT = prompts.movement_generation_prompt
 
     return prompts
-
-@router.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    try:
-        while True:
-            # Receive a message from the WebSocket client
-            message = await websocket.receive_text()
-            logger.info(f"Received message: {message}")
-            
-            # Send a response back
-            await websocket.send_text(f"Message received: {message}")
-    except WebSocketDisconnect:
-        logger.info("Client disconnected.")

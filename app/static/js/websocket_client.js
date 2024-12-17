@@ -1,4 +1,4 @@
-const wsUrl = `ws://${window.location.host}/ws`; // WebSocket URL
+const wsUrl = `ws://localhost:8000/app/ws`;
 let websocket = new WebSocket(wsUrl); // WebSocket instance
 
 // Function to scroll to the bottom of the logs div

@@ -1,8 +1,9 @@
 import os
 import random
 import asyncio
+import time
 from typing import List, Dict
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.openapi.docs import get_swagger_ui_html
@@ -16,6 +17,9 @@ from asyncio import Semaphore
 from contextlib import asynccontextmanager
 from typing import List
 from fastapi.middleware.cors import CORSMiddleware
+import json
+from datetime import datetime
+from fastapi.openapi.docs import get_swagger_ui_html
 
 load_dotenv()
 
@@ -140,6 +144,8 @@ async def fetch_prompts_from_fastapi():
             logger.warning("Failed to fetch prompts, using default ones.")
             return {}  # Return an empty dict to trigger the default prompts
 
+from app.endpoints.api import router as api_router
+
 # Lifespan Context Manager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -148,8 +154,8 @@ async def lifespan(app: FastAPI):
     try:
         # Startup logic
         await redis.ping()
-        logger.info("Redis connection established.")
-        yield  # Application is running
+        logger.info("Redis connection established.")       
+        yield
     finally:
         # Shutdown logic
         logger.info("Shutting down application...")
@@ -164,6 +170,7 @@ app = FastAPI(
     description="This is the enhanced implementation of the <a href='https://arxiv.org/pdf/2411.03252' target='_blank'>Takata et al experiment.</a>",
     lifespan=lifespan
 )
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Allow all origins or specify your frontend's URL
@@ -172,103 +179,4 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from app.endpoints.api import router as api_router
 app.include_router(api_router, prefix="/api", tags=["simulation"])
-
-# Serve static files
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
-@app.get("/docs", tags=["Simulation"], include_in_schema=False)
-async def custom_swagger_ui_html():
-    logger.info("Custom /docs endpoint is being served")  # Logs when /docs is accessed
-    html = get_swagger_ui_html(
-        openapi_url=app.openapi_url,
-        title="FastAPI - WebSocket Integration",
-    )
-
-    custom_script = '<script src="/static/js/websocket_client.js"></script>'
-    log_area = '''
-        <div class="opblock opblock-get" id="websocket-logs-section" style="margin-top: 20px; max-width: 1400px; margin: auto;">
-            <div class="opblock-summary opblock-summary-get">
-                <button
-                    aria-expanded="true"
-                    class="opblock-summary-control"
-                    style="display: flex; align-items: center; justify-content: space-between; width: 100%; border: none; background: none; padding: 10px 15px; cursor: pointer; font-weight: bold; font-size: 14px;"
-                    onclick="toggleLogSection()"
-                >
-                    <span>MetaStrata Logs</span>
-                    <span style="font-size: 18px;">&#x25B2;</span>
-                </button>
-            </div>
-            <div id="websocket-logs-container" class="opblock-body" style="display: block; padding: 10px; background-color: #f6f6f6; border: 1px solid #e8e8e8; border-radius: 4px;">
-                <div id="websocket-controls" style="text-align: center; margin-bottom: 10px;">
-                    <button id="clear-logs" style="margin-right: 10px; padding: 5px 10px; border-radius: 5px; background-color: #f44336; color: white; border: none; cursor: pointer;">
-                        Clear Logs
-                    </button>
-                    <button id="select-all" style="padding: 5px 10px; border-radius: 5px; background-color: #4caf50; color: white; border: none; cursor: pointer;">
-                        Select All
-                    </button>
-                </div>
-                <div id="websocket-logs" style="background: #f9f9f9; padding: 10px; height: 700px; overflow-y: auto; border: 1px solid #ccc; border-radius: 5px">
-                    <p>WebSocket logs will appear here...</p>
-                </div>
-            </div>
-        </div>
-    '''
-    custom_script += '''
-        <script>
-    let socket;
-
-    function connectWebSocket() {
-        socket = new WebSocket("ws://localhost:8000/ws");
-        
-        socket.onopen = function() {
-            console.log("WebSocket connection established.");
-            document.getElementById("websocket-logs").innerHTML += "<p>Connected to WebSocket</p>";
-        };
-
-        socket.onmessage = function(event) {
-            console.log("Received message: ", event.data);
-            document.getElementById("websocket-logs").innerHTML += "<p>Message from server: " + event.data + "</p>";
-        };
-
-        socket.onclose = function() {
-            console.log("WebSocket connection closed.");
-            document.getElementById("websocket-logs").innerHTML += "<p>WebSocket connection closed.</p>";
-        };
-
-        socket.onerror = function(error) {
-            console.log("WebSocket error: ", error);
-            document.getElementById("websocket-logs").innerHTML += "<p>WebSocket error occurred.</p>";
-        };
-    }
-
-    function sendMessage() {
-        const message = document.getElementById("websocket-input").value;
-        if (socket && socket.readyState === WebSocket.OPEN) {
-            socket.send(message);
-            document.getElementById("websocket-logs").innerHTML += "<p>Sent message: " + message + "</p>";
-        }
-    }
-
-    document.addEventListener("DOMContentLoaded", function() {
-        connectWebSocket();  // Connect when the page loads
-
-        // Send message when user presses Enter
-        const inputField = document.getElementById("websocket-input");
-        inputField.addEventListener("keypress", function(event) {
-            if (event.key === "Enter") {
-                sendMessage();
-            }
-        });
-    });
-    </script>
-    '''
-    
-    modified_html = html.body.decode("utf-8").replace("</body>", f"{custom_script}{log_area}</body>")
-    
-    return HTMLResponse(modified_html)  
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
