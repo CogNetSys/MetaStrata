@@ -110,7 +110,7 @@ class LogfireHandler(logging.Handler):
             print(f"Failed to send log to Logfire: {e}")
 
 # LOGFIRE CONFIG
-logfire.configure(service_name="CogNetics Architect")  
+logfire.configure(environment='local', service_name="CogNetics Architect")  
 
 # Configure Logger
 logger = logging.getLogger('simulation_app')
