@@ -16,7 +16,7 @@ import queue
 import threading
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
-
+from app.models import SimulationSettings, PromptSettings
 import logfire  # Re-enabled import of the 'logfire' module
 
 # Load environment variables
@@ -30,13 +30,6 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
 LOGFIRE_API_KEY = os.getenv("LOGFIRE_API_KEY")
 LOGFIRE_ENABLED = os.getenv("LOGFIRE_ENABLED", "false").lower() == "true"
 
-if LOGFIRE_ENABLED:
-    # Configure Logfire and enable auto-tracing
-    logfire.configure(environment='local', service_name="CogNetics Architect")
-    print("Logfire is enabled.")
-else:
-    print("Logfire is disabled.")
-
 # GROQ API Configuration
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_API_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
@@ -49,9 +42,9 @@ CHEBYSHEV_DISTANCE = 5
 LLM_MODEL = "llama-3.3-70b-versatile"
 LLM_MAX_TOKENS = 2048
 LLM_TEMPERATURE = 0.7
-REQUEST_DELAY = 2.2  # Fixed delay in seconds between requests
+REQUEST_DELAY = 1.2  # Fixed delay in seconds between requests
 MAX_CONCURRENT_REQUESTS = 5  # Limit concurrent requests to prevent rate limiting
-LOG_LEVEL = "INFO"  # Can be 'DEBUG', 'INFO', 'ERROR', etc.
+LOG_LEVEL = "DEBUG"  # Can be 'DEBUG', 'INFO', 'ERROR', etc.
 
 # Prompt Templates
 GRID_DESCRIPTION = f"You are in a {GRID_SIZE} x {GRID_SIZE} field with periodic boundary conditions with {NUM_ENTITIES} other lifeforms. You are free to move around the field and interact with other lifeforms."
@@ -78,18 +71,6 @@ You have a summary memory of the situation so far: {memory}.
 Based on the above, choose your next move. Respond with only one of the following options, and nothing else: "x+1", "x-1", "y+1", "y-1", or "stay".
 Do not provide any explanation or additional text.
 """
-
-# Define the configuration model
-class SimulationSettings(BaseModel):
-    grid_size: int = GRID_SIZE
-    num_entities: int = NUM_ENTITIES
-    max_steps: int = MAX_STEPS
-    chebyshev_distance: int = CHEBYSHEV_DISTANCE
-    llm_model: str = LLM_MODEL
-    llm_max_tokens: int = LLM_MAX_TOKENS
-    llm_temperature: float = LLM_TEMPERATURE
-    request_delay: float = REQUEST_DELAY
-    max_concurrent_requests: int = MAX_CONCURRENT_REQUESTS
 
 # Data Models
 class StepRequest(BaseModel):

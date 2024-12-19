@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 import httpx
 import logfire
 from pydantic import BaseModel
+from app.models import SimulationSettings, PromptSettings
 from app.main import (
     StepRequest, chebyshev_distance, redis, logger, supabase, initialize_entities,
     fetch_prompts_from_fastapi, fetch_nearby_messages, connected_clients, GROQ_API_KEY, GROQ_API_ENDPOINT,
@@ -31,24 +32,6 @@ class Entity(BaseModel):
     x: int
     y: int
     memory: str = ""  # Default empty memory for new entities
-
-# Simulation Settings Model
-class SimulationSettings(BaseModel):
-    grid_size: int = GRID_SIZE
-    num_entities: int = NUM_ENTITIES
-    max_steps: int = MAX_STEPS
-    chebyshev_distance: int = CHEBYSHEV_DISTANCE
-    llm_model: str = LLM_MODEL
-    llm_max_tokens: int = LLM_MAX_TOKENS
-    llm_temperature: float = LLM_TEMPERATURE
-    request_delay: float = REQUEST_DELAY
-    max_concurrent_requests: int = MAX_CONCURRENT_REQUESTS
-
-# Prompt Settings Model
-class PromptSettings(BaseModel):
-    message_generation_prompt: str
-    memory_generation_prompt: str
-    movement_generation_prompt: str
 
 # Helper Functions
 
@@ -116,7 +99,7 @@ async def send_llm_request(prompt, max_retries=3, base_delay=2):
                             return {"message": "", "memory": "", "movement": "stay"}
                         delay = base_delay * (2 ** (attempt - 1))
                         if LOGFIRE_ENABLED:
-                            logfire.warning(f"Received 429 Too Many Requests. Retrying in {delay} seconds...")
+                            logfire.error(f"Received 429 Too Many Requests. Retrying in {delay} seconds...")
                         await asyncio.sleep(delay)
                         continue
                     response.raise_for_status()
@@ -125,7 +108,7 @@ async def send_llm_request(prompt, max_retries=3, base_delay=2):
                     # Validate expected keys
                     if not all(key in result for key in ["choices"]):
                         if LOGFIRE_ENABLED:
-                            logfire.warning(f"Incomplete response from LLM: {result}")
+                            logfire.error(f"Incomplete response from LLM: {result}")
                         return {"message": "", "memory": "", "movement": "stay"}
 
                     # Extract content from choices
@@ -148,13 +131,13 @@ async def send_llm_request(prompt, max_retries=3, base_delay=2):
                                 break
                         else:
                             if LOGFIRE_ENABLED:
-                                logfire.warning(f"Invalid movement command in LLM response: {content}")
+                                logfire.error(f"Invalid movement command in LLM response: {content}")
                             movement = "stay"  # Default to "stay" if invalid
                         await asyncio.sleep(REQUEST_DELAY)
                         return {"movement": movement}
                     else:
                         if LOGFIRE_ENABLED:
-                            logfire.warning(f"Unexpected prompt type: {prompt}")
+                            logfire.error(f"Unexpected prompt type: {prompt}")
                         await asyncio.sleep(REQUEST_DELAY)
                         return {"message": "", "memory": "", "movement": "stay"}
             except Exception as e:
@@ -236,7 +219,7 @@ async def perform_steps(request: StepRequest):
 
             if "message" not in message_result:
                 if LOGFIRE_ENABLED:
-                    logfire.warning(f"Skipping message update for Entity {entity['id']} due to invalid response.")
+                    logfire.error(f"Skipping message update for Entity {entity['id']} due to invalid response.")
                 continue
             await redis.hset(f"entity:{entity['id']}", "message", message_result.get("message", ""))
             if LOGFIRE_ENABLED:
@@ -271,7 +254,7 @@ async def perform_steps(request: StepRequest):
 
             if "memory" not in memory_result:
                 if LOGFIRE_ENABLED:
-                    logfire.warning(f"Skipping memory update for Entity {entity['id']} due to invalid response.")
+                    logfire.error(f"Skipping memory update for Entity {entity['id']} due to invalid response.")
                 continue
             updated_memory = memory_result.get("memory", entity["memory"])
             await redis.hset(f"entity:{entity['id']}", "memory", updated_memory)
@@ -307,7 +290,7 @@ async def perform_steps(request: StepRequest):
 
             if "movement" not in movement_result:
                 if LOGFIRE_ENABLED:
-                    logfire.warning(f"Skipping movement update for Entity {entity['id']} due to invalid response.")
+                    logfire.error(f"Skipping movement update for Entity {entity['id']} due to invalid response.")
                 continue
 
             # Apply movement logic
@@ -328,7 +311,7 @@ async def perform_steps(request: StepRequest):
                 continue  # No update needed for stay
             else:
                 if LOGFIRE_ENABLED:
-                    logfire.warning(f"Invalid movement command for Entity {entity['id']}: {movement}")
+                    logfire.error(f"Invalid movement command for Entity {entity['id']}: {movement}")
                 continue  # Skip invalid commands
 
             # Log and update position
@@ -430,7 +413,7 @@ async def delete_entity(entity_id: int):
             logfire.info(f"Entity {entity_id} deleted from Redis.")
     else:
         if LOGFIRE_ENABLED:
-            logfire.warning(f"Attempted to delete non-existent Entity {entity_id} from Redis.")
+            logfire.error(f"Attempted to delete non-existent Entity {entity_id} from Redis.")
     
     # Optionally, delete entity from Supabase
     supabase.table("entities").delete().eq("id", entity_id).execute()
@@ -478,10 +461,10 @@ async def get_nearby_entities(entity_id: int):
                     all_entities.append(nearby_entity)
                 except (KeyError, ValueError) as e:
                     if LOGFIRE_ENABLED:
-                        logfire.warning(f"Missing or invalid data for entity {i}: {e}. Skipping.")
+                        logfire.error(f"Missing or invalid data for entity {i}: {e}. Skipping.")
             else:
                 if LOGFIRE_ENABLED:
-                    logfire.warning(f"Missing or incomplete data for entity {i}. Skipping.")
+                    logfire.error(f"Missing or incomplete data for entity {i}. Skipping.")
 
     # Filter nearby entities based on Chebyshev distance
     nearby_entities = [
@@ -510,10 +493,10 @@ async def sync_entities():
                 all_entities.append(entity)
             except (KeyError, ValueError) as e:
                 if LOGFIRE_ENABLED:
-                    logfire.warning(f"Error parsing entity {i} data: {e}. Skipping.")
+                    logfire.error(f"Error parsing entity {i} data: {e}. Skipping.")
         else:
             if LOGFIRE_ENABLED:
-                logfire.warning(f"Missing or incomplete data for entity {i}. Skipping.")
+                logfire.error(f"Missing or incomplete data for entity {i}. Skipping.")
 
     for entity in all_entities:
         supabase.table("entities").upsert(entity.dict()).execute()
