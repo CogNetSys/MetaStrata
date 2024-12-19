@@ -13,7 +13,7 @@ from app.main import (
     LLM_MAX_TOKENS, LLM_TEMPERATURE, REQUEST_DELAY, MAX_CONCURRENT_REQUESTS,
     GRID_DESCRIPTION, DEFAULT_MESSAGE_GENERATION_PROMPT,
     DEFAULT_MEMORY_GENERATION_PROMPT, DEFAULT_MOVEMENT_GENERATION_PROMPT,
-    send_log_message
+    send_log_message, LOGFIRE_ENABLED
 )
 
 # Global variable to track connected WebSocket clients
@@ -74,9 +74,10 @@ def patched_debug(message, *args, **kwargs):
     """
     Redirect logfire.debug calls to Python's logging.debug.
     """
-    if args:
-        message = message.format(*args)
-    logging.debug(message)  # Send to Python logging instead of Logfire
+    if LOGFIRE_ENABLED:
+        if args:
+            message = message.format(*args)
+        logging.debug(message)  # Send to Python logging instead of Logfire
     # Optionally, send to Logfire for non-debug levels
     # original_debug(message, **kwargs)
 
@@ -87,7 +88,8 @@ async def send_llm_request(prompt, max_retries=3, base_delay=2):
     global stop_signal
     async with global_request_semaphore:
         if stop_signal:
-            logfire.info("Stopping LLM request due to stop signal.")
+            if LOGFIRE_ENABLED:
+                logfire.info("Stopping LLM request due to stop signal.")
             return {"message": "", "memory": "", "movement": "stay"}
 
         headers = {
@@ -109,10 +111,12 @@ async def send_llm_request(prompt, max_retries=3, base_delay=2):
                     if response.status_code == 429:
                         attempt += 1
                         if attempt > max_retries:
-                            logfire.error("Exceeded max retries for LLM request.")
+                            if LOGFIRE_ENABLED:
+                                logfire.error("Exceeded max retries for LLM request.")
                             return {"message": "", "memory": "", "movement": "stay"}
                         delay = base_delay * (2 ** (attempt - 1))
-                        logfire.warning(f"Received 429 Too Many Requests. Retrying in {delay} seconds...")
+                        if LOGFIRE_ENABLED:
+                            logfire.warning(f"Received 429 Too Many Requests. Retrying in {delay} seconds...")
                         await asyncio.sleep(delay)
                         continue
                     response.raise_for_status()
@@ -120,7 +124,8 @@ async def send_llm_request(prompt, max_retries=3, base_delay=2):
 
                     # Validate expected keys
                     if not all(key in result for key in ["choices"]):
-                        logfire.warning(f"Incomplete response from LLM: {result}")
+                        if LOGFIRE_ENABLED:
+                            logfire.warning(f"Incomplete response from LLM: {result}")
                         return {"message": "", "memory": "", "movement": "stay"}
 
                     # Extract content from choices
@@ -142,16 +147,19 @@ async def send_llm_request(prompt, max_retries=3, base_delay=2):
                                 movement = cmd
                                 break
                         else:
-                            logfire.warning(f"Invalid movement command in LLM response: {content}")
+                            if LOGFIRE_ENABLED:
+                                logfire.warning(f"Invalid movement command in LLM response: {content}")
                             movement = "stay"  # Default to "stay" if invalid
                         await asyncio.sleep(REQUEST_DELAY)
                         return {"movement": movement}
                     else:
-                        logfire.warning(f"Unexpected prompt type: {prompt}")
+                        if LOGFIRE_ENABLED:
+                            logfire.warning(f"Unexpected prompt type: {prompt}")
                         await asyncio.sleep(REQUEST_DELAY)
                         return {"message": "", "memory": "", "movement": "stay"}
             except Exception as e:
-                logfire.error(f"Error during LLM request: {e}")
+                if LOGFIRE_ENABLED:
+                    logfire.error(f"Error during LLM request: {e}")
                 return {"message": "", "memory": "", "movement": "stay"}
 
 # Simulation API Endpoints
@@ -162,7 +170,8 @@ async def reset_and_initialize():
     stop_signal = False  # Reset stop signal before starting
     await redis.flushdb()
     entities = await initialize_entities()
-    logfire.info("Simulation reset and initialized successfully.")
+    if LOGFIRE_ENABLED:
+        logfire.info("Simulation reset and initialized successfully.")
     return JSONResponse({"status": "Simulation reset and initialized successfully.", "entities": entities})
 
 @router.post("/step")
@@ -170,11 +179,13 @@ async def perform_steps(request: StepRequest):
     global stop_signal
     stop_signal = False  # Reset stop signal before starting steps
 
-    logfire.info(f"Starting {request.steps} step(s).")
+    if LOGFIRE_ENABLED:
+        logfire.info(f"Starting {request.steps} step(s).")
 
     # Fetch the current prompt templates from FastAPI
     prompts = await fetch_prompts_from_fastapi()
-    logfire.debug(f"Fetched prompts: {prompts}")
+    if LOGFIRE_ENABLED:
+        logfire.debug(f"Fetched prompts: {prompts}")
 
     entities = []
     for i in range(NUM_ENTITIES):
@@ -188,11 +199,13 @@ async def perform_steps(request: StepRequest):
                 "memory": entity_data.get("memory", "")
             })
 
-    logfire.info(f"Loaded {len(entities)} entities for simulation.")
+    if LOGFIRE_ENABLED:
+        logfire.info(f"Loaded {len(entities)} entities for simulation.")
 
     for _ in range(request.steps):
         if stop_signal:
-            logfire.info("Stopping steps due to stop signal.")
+            if LOGFIRE_ENABLED:
+                logfire.info("Stopping steps due to stop signal.")
             break
 
         # Use either custom prompts from FastAPI or fall back to default prompts
@@ -203,10 +216,12 @@ async def perform_steps(request: StepRequest):
         # Message Generation
         for entity in entities:
             if stop_signal:
-                logfire.info("Stopping after message generation due to stop signal.")
+                if LOGFIRE_ENABLED:
+                    logfire.info("Stopping after message generation due to stop signal.")
                 break
             nearby_messages = await fetch_nearby_messages(entity, entities)
-            logfire.debug(f"Entity {entity['id']} nearby messages: {nearby_messages}")
+            if LOGFIRE_ENABLED:
+                logfire.debug(f"Entity {entity['id']} nearby messages: {nearby_messages}")
 
             message_result = await send_llm_request(
                 message_prompt.format(
@@ -216,26 +231,32 @@ async def perform_steps(request: StepRequest):
                     distance=CHEBYSHEV_DISTANCE
                 )
             )
-            logfire.debug(f"LLM message result for Entity {entity['id']}: {message_result}")
+            if LOGFIRE_ENABLED:
+                logfire.debug(f"LLM message result for Entity {entity['id']}: {message_result}")
 
             if "message" not in message_result:
-                logfire.warning(f"Skipping message update for Entity {entity['id']} due to invalid response.")
+                if LOGFIRE_ENABLED:
+                    logfire.warning(f"Skipping message update for Entity {entity['id']} due to invalid response.")
                 continue
             await redis.hset(f"entity:{entity['id']}", "message", message_result.get("message", ""))
-            logfire.info(f"Entity {entity['id']} message updated to: {message_result.get('message')}")
+            if LOGFIRE_ENABLED:
+                logfire.info(f"Entity {entity['id']} message updated to: {message_result.get('message')}")
             await asyncio.sleep(REQUEST_DELAY)
 
         if stop_signal:
-            logfire.info("Stopping after message generation due to stop signal.")
+            if LOGFIRE_ENABLED:
+                logfire.info("Stopping after message generation due to stop signal.")
             break
 
         # Memory Generation
         for entity in entities:
             if stop_signal:
-                logfire.info("Stopping after memory generation due to stop signal.")
+                if LOGFIRE_ENABLED:
+                    logfire.info("Stopping after memory generation due to stop signal.")
                 break
             nearby_messages = await fetch_nearby_messages(entity, entities)
-            logfire.debug(f"Entity {entity['id']} nearby messages for memory: {nearby_messages}")
+            if LOGFIRE_ENABLED:
+                logfire.debug(f"Entity {entity['id']} nearby messages for memory: {nearby_messages}")
 
             memory_result = await send_llm_request(
                 memory_prompt.format(
@@ -245,27 +266,33 @@ async def perform_steps(request: StepRequest):
                     distance=CHEBYSHEV_DISTANCE
                 )
             )
-            logfire.debug(f"LLM memory result for Entity {entity['id']}: {memory_result}")
+            if LOGFIRE_ENABLED:
+                logfire.debug(f"LLM memory result for Entity {entity['id']}: {memory_result}")
 
             if "memory" not in memory_result:
-                logfire.warning(f"Skipping memory update for Entity {entity['id']} due to invalid response.")
+                if LOGFIRE_ENABLED:
+                    logfire.warning(f"Skipping memory update for Entity {entity['id']} due to invalid response.")
                 continue
             updated_memory = memory_result.get("memory", entity["memory"])
             await redis.hset(f"entity:{entity['id']}", "memory", updated_memory)
-            logfire.info(f"Entity {entity['id']} memory updated to: {updated_memory}")
+            if LOGFIRE_ENABLED:
+                logfire.info(f"Entity {entity['id']} memory updated to: {updated_memory}")
             await asyncio.sleep(REQUEST_DELAY)
 
         if stop_signal:
-            logfire.info("Stopping after memory generation due to stop signal.")
+            if LOGFIRE_ENABLED:
+                logfire.info("Stopping after memory generation due to stop signal.")
             break
 
         # Movement Generation
         for entity in entities:
             if stop_signal:
-                logfire.info("Stopping after movement generation due to stop signal.")
+                if LOGFIRE_ENABLED:
+                    logfire.info("Stopping after movement generation due to stop signal.")
                 break
             nearby_messages = await fetch_nearby_messages(entity, entities)
-            logfire.debug(f"Entity {entity['id']} nearby messages for movement: {nearby_messages}")
+            if LOGFIRE_ENABLED:
+                logfire.debug(f"Entity {entity['id']} nearby messages for movement: {nearby_messages}")
 
             movement_result = await send_llm_request(
                 movement_prompt.format(
@@ -275,10 +302,12 @@ async def perform_steps(request: StepRequest):
                     distance=CHEBYSHEV_DISTANCE
                 )
             )
-            logfire.debug(f"LLM movement result for Entity {entity['id']}: {movement_result}")
+            if LOGFIRE_ENABLED:
+                logfire.debug(f"LLM movement result for Entity {entity['id']}: {movement_result}")
 
             if "movement" not in movement_result:
-                logfire.warning(f"Skipping movement update for Entity {entity['id']} due to invalid response.")
+                if LOGFIRE_ENABLED:
+                    logfire.warning(f"Skipping movement update for Entity {entity['id']} due to invalid response.")
                 continue
 
             # Apply movement logic
@@ -294,38 +323,46 @@ async def perform_steps(request: StepRequest):
             elif movement == "y-1":
                 entity["y"] = (entity["y"] - 1) % GRID_SIZE
             elif movement == "stay":
-                logfire.info(f"Entity {entity['id']} stays in place at {initial_position}.")
+                if LOGFIRE_ENABLED:
+                    logfire.info(f"Entity {entity['id']} stays in place at {initial_position}.")
                 continue  # No update needed for stay
             else:
-                logfire.warning(f"Invalid movement command for Entity {entity['id']}: {movement}")
+                if LOGFIRE_ENABLED:
+                    logfire.warning(f"Invalid movement command for Entity {entity['id']}: {movement}")
                 continue  # Skip invalid commands
 
             # Log and update position
-            logfire.info(f"Entity {entity['id']} moved from {initial_position} to ({entity['x']}, {entity['y']}) with action '{movement}'.")
+            if LOGFIRE_ENABLED:
+                logfire.info(f"Entity {entity['id']} moved from {initial_position} to ({entity['x']}, {entity['y']}) with action '{movement}'.")
             await redis.hset(f"entity:{entity['id']}", mapping={"x": entity["x"], "y": entity["y"]})
-            logfire.debug(f"Entity {entity['id']} position updated in Redis.")
+            if LOGFIRE_ENABLED:
+                logfire.debug(f"Entity {entity['id']} position updated in Redis.")
             await asyncio.sleep(REQUEST_DELAY)
 
-    logfire.info(f"Completed {request.steps} step(s).")
+    if LOGFIRE_ENABLED:
+        logfire.info(f"Completed {request.steps} step(s).")
     return JSONResponse({"status": f"Performed {request.steps} step(s)."})
 
 @router.post("/stop")
 async def stop_simulation():
     global stop_signal
     stop_signal = True
-    logfire.info("Stop signal triggered.")
+    if LOGFIRE_ENABLED:
+        logfire.info("Stop signal triggered.")
     return JSONResponse({"status": "Simulation stopping."})
 
 @router.post("/entities", response_model=Entity)
 async def create_entity(entity: Entity):
     # Create entity data in Redis
     await redis.hset(f"entity:{entity.id}", mapping=entity.dict())
-    logfire.info(f"Entity {entity.id} created in Redis.")
+    if LOGFIRE_ENABLED:
+        logfire.info(f"Entity {entity.id} created in Redis.")
 
     # Optionally, store entity in Supabase for persistent storage
     supabase.table("entities").insert(entity.dict()).execute()
-    logfire.info(f"Entity {entity.id} stored in Supabase.")
-    
+    if LOGFIRE_ENABLED:
+        logfire.info(f"Entity {entity.id} stored in Supabase.")
+        
     return entity
 
 @router.get("/entities/{entity_id}", response_model=Entity)
@@ -333,7 +370,8 @@ async def get_entity(entity_id: int):
     # Fetch entity data from Redis
     entity_data = await redis.hgetall(f"entity:{entity_id}")
     if not entity_data:
-        logfire.error(f"Entity {entity_id} not found.")
+        if LOGFIRE_ENABLED:
+            logfire.error(f"Entity {entity_id} not found.")
         raise HTTPException(status_code=404, detail="Entity not found")
     
     # Convert Redis data into an Entity model (ensure proper types are cast)
@@ -345,22 +383,26 @@ async def get_entity(entity_id: int):
             y=int(entity_data["y"]),
             memory=entity_data.get("memory", "")
         )
-        logfire.debug(f"Entity {entity_id} retrieved from Redis.")
+        if LOGFIRE_ENABLED:
+            logfire.debug(f"Entity {entity_id} retrieved from Redis.")
         return entity
     except (KeyError, ValueError) as e:
-        logfire.error(f"Error parsing entity {entity_id} data: {e}")
+        if LOGFIRE_ENABLED:
+            logfire.error(f"Error parsing entity {entity_id} data: {e}")
         raise HTTPException(status_code=500, detail="Error retrieving entity data")
 
 @router.put("/entities/{entity_id}", response_model=Entity)
 async def update_entity(entity_id: int, entity: Entity):
     # Update entity data in Redis
     await redis.hset(f"entity:{entity_id}", mapping=entity.dict())
-    logfire.info(f"Entity {entity_id} updated in Redis.")
+    if LOGFIRE_ENABLED:
+        logfire.info(f"Entity {entity_id} updated in Redis.")
 
     # Optionally, update entity in Supabase for persistent storage
     supabase.table("entities").update(entity.dict()).eq("id", entity_id).execute()
-    logfire.info(f"Entity {entity_id} updated in Supabase.")
-    
+    if LOGFIRE_ENABLED:
+        logfire.info(f"Entity {entity_id} updated in Supabase.")
+        
     return entity
 
 @router.post("/entities/{entity_id}/send_message")
@@ -368,12 +410,14 @@ async def send_message(entity_id: int, message: str):
     # Get the entity's current position and details
     entity_data = await redis.hgetall(f"entity:{entity_id}")
     if not entity_data:
-        logfire.error(f"Entity {entity_id} not found for sending message.")
+        if LOGFIRE_ENABLED:
+            logfire.error(f"Entity {entity_id} not found for sending message.")
         raise HTTPException(status_code=404, detail="Entity not found")
     
     # Save the message in Redis for the entity
     await redis.hset(f"entity:{entity_id}", "message", message)
-    logfire.info(f"Message sent by Entity {entity_id}: {message}")
+    if LOGFIRE_ENABLED:
+        logfire.info(f"Message sent by Entity {entity_id}: {message}")
     
     return {"status": "Message sent successfully", "message": message}
 
@@ -382,13 +426,16 @@ async def delete_entity(entity_id: int):
     # Delete entity from Redis
     deleted = await redis.delete(f"entity:{entity_id}")
     if deleted:
-        logfire.info(f"Entity {entity_id} deleted from Redis.")
+        if LOGFIRE_ENABLED:
+            logfire.info(f"Entity {entity_id} deleted from Redis.")
     else:
-        logfire.warning(f"Attempted to delete non-existent Entity {entity_id} from Redis.")
+        if LOGFIRE_ENABLED:
+            logfire.warning(f"Attempted to delete non-existent Entity {entity_id} from Redis.")
     
     # Optionally, delete entity from Supabase
     supabase.table("entities").delete().eq("id", entity_id).execute()
-    logfire.info(f"Entity {entity_id} deleted from Supabase.")
+    if LOGFIRE_ENABLED:
+        logfire.info(f"Entity {entity_id} deleted from Supabase.")
     
     return {"status": "Entity deleted successfully"}
 
@@ -397,7 +444,8 @@ async def get_nearby_entities(entity_id: int):
     # Get the entity's position from Redis
     entity_data = await redis.hgetall(f"entity:{entity_id}")
     if not entity_data:
-        logfire.error(f"Entity {entity_id} not found for fetching nearby entities.")
+        if LOGFIRE_ENABLED:
+            logfire.error(f"Entity {entity_id} not found for fetching nearby entities.")
         raise HTTPException(status_code=404, detail="Entity not found")
 
     try:
@@ -409,7 +457,8 @@ async def get_nearby_entities(entity_id: int):
             memory=entity_data.get("memory", "")
         )
     except (KeyError, ValueError) as e:
-        logfire.error(f"Error parsing entity {entity_id} data: {e}")
+        if LOGFIRE_ENABLED:
+            logfire.error(f"Error parsing entity {entity_id} data: {e}")
         raise HTTPException(status_code=500, detail="Error retrieving entity data")
 
     # Fetch all entities except the current one
@@ -428,9 +477,11 @@ async def get_nearby_entities(entity_id: int):
                     )
                     all_entities.append(nearby_entity)
                 except (KeyError, ValueError) as e:
-                    logfire.warning(f"Missing or invalid data for entity {i}: {e}. Skipping.")
+                    if LOGFIRE_ENABLED:
+                        logfire.warning(f"Missing or invalid data for entity {i}: {e}. Skipping.")
             else:
-                logfire.warning(f"Missing or incomplete data for entity {i}. Skipping.")
+                if LOGFIRE_ENABLED:
+                    logfire.warning(f"Missing or incomplete data for entity {i}. Skipping.")
 
     # Filter nearby entities based on Chebyshev distance
     nearby_entities = [
@@ -438,7 +489,8 @@ async def get_nearby_entities(entity_id: int):
         if chebyshev_distance(entity.x, entity.y, a.x, a.y) <= CHEBYSHEV_DISTANCE
     ]
 
-    logfire.debug(f"Fetched {len(nearby_entities)} nearby entities for Entity {entity_id}.")
+    if LOGFIRE_ENABLED:
+        logfire.debug(f"Fetched {len(nearby_entities)} nearby entities for Entity {entity_id}.")
     return nearby_entities
 
 @router.post("/sync_entities")
@@ -457,15 +509,19 @@ async def sync_entities():
                 )
                 all_entities.append(entity)
             except (KeyError, ValueError) as e:
-                logfire.warning(f"Error parsing entity {i} data: {e}. Skipping.")
+                if LOGFIRE_ENABLED:
+                    logfire.warning(f"Error parsing entity {i} data: {e}. Skipping.")
         else:
-            logfire.warning(f"Missing or incomplete data for entity {i}. Skipping.")
+            if LOGFIRE_ENABLED:
+                logfire.warning(f"Missing or incomplete data for entity {i}. Skipping.")
 
     for entity in all_entities:
         supabase.table("entities").upsert(entity.dict()).execute()
-        logfire.info(f"Entity {entity.id} synchronized to Supabase.")
+        if LOGFIRE_ENABLED:
+            logfire.info(f"Entity {entity.id} synchronized to Supabase.")
 
-    logfire.info("All entities synchronized between Redis and Supabase.")
+    if LOGFIRE_ENABLED:
+        logfire.info("All entities synchronized between Redis and Supabase.")
     return {"status": "Entities synchronized between Redis and Supabase"}
 
 @router.get("/settings", response_model=SimulationSettings)
@@ -481,7 +537,8 @@ async def get_settings():
         request_delay=REQUEST_DELAY,
         max_concurrent_requests=MAX_CONCURRENT_REQUESTS
     )
-    logfire.debug("Simulation settings retrieved.")
+    if LOGFIRE_ENABLED:
+        logfire.debug("Simulation settings retrieved.")
     return settings
 
 @router.post("/settings", response_model=SimulationSettings)
@@ -499,7 +556,8 @@ async def set_settings(settings: SimulationSettings):
     REQUEST_DELAY = settings.request_delay
     MAX_CONCURRENT_REQUESTS = settings.max_concurrent_requests
 
-    logfire.info("Simulation settings updated.")
+    if LOGFIRE_ENABLED:
+        logfire.info("Simulation settings updated.")
     return settings
 
 # Endpoint to get current prompt templates
@@ -510,7 +568,8 @@ async def get_prompts():
         memory_generation_prompt=DEFAULT_MEMORY_GENERATION_PROMPT,
         movement_generation_prompt=DEFAULT_MOVEMENT_GENERATION_PROMPT
     )
-    logfire.debug("Prompt templates retrieved.")
+    if LOGFIRE_ENABLED:
+        logfire.debug("Prompt templates retrieved.")
     return prompts
 
 # Endpoint to set new prompt templates
@@ -522,5 +581,6 @@ async def set_prompts(prompts: PromptSettings):
     DEFAULT_MEMORY_GENERATION_PROMPT = prompts.memory_generation_prompt
     DEFAULT_MOVEMENT_GENERATION_PROMPT = prompts.movement_generation_prompt
 
-    logfire.info("Prompt templates updated.")
+    if LOGFIRE_ENABLED:
+        logfire.info("Prompt templates updated.")
     return prompts

@@ -16,8 +16,8 @@ import queue
 import threading
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
-import logfire
-import time
+
+import logfire  # Re-enabled import of the 'logfire' module
 
 # Load environment variables
 load_dotenv()
@@ -28,6 +28,14 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 REDIS_ENDPOINT = os.getenv("REDIS_ENDPOINT")
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
 LOGFIRE_API_KEY = os.getenv("LOGFIRE_API_KEY")
+LOGFIRE_ENABLED = os.getenv("LOGFIRE_ENABLED", "false").lower() == "true"
+
+if LOGFIRE_ENABLED:
+    # Configure Logfire and enable auto-tracing
+    logfire.configure(environment='local', service_name="CogNetics Architect")
+    print("Logfire is enabled.")
+else:
+    print("Logfire is disabled.")
 
 # GROQ API Configuration
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -110,23 +118,27 @@ class LogfireHandler(logging.Handler):
             print(f"Failed to send log to Logfire: {e}")
 
 # LOGFIRE CONFIG
-logfire.configure(environment='local', service_name="CogNetics Architect")  
+# logfire.configure(environment='local', service_name="CogNetics Architect")  # Not needed anymore
 
 # Configure Logger
 logger = logging.getLogger('simulation_app')
 logger.setLevel(LOG_LEVEL)
 logger.propagate = False  # Prevent duplicate logs
 
+# Initialize logfire_handler as None
+logfire_handler = None
+
 # Logfire Handler
-if LOGFIRE_API_KEY:
+if LOGFIRE_ENABLED and LOGFIRE_API_KEY:
     logfire_handler = LogfireHandler(LOGFIRE_API_KEY)
     logfire_formatter = logging.Formatter(
         '{"timestamp": "%(asctime)s", "level": "%(levelname)s", "message": "%(message)s", "module": "%(module)s", "line": "%(lineno)d"}'
     )
     logfire_handler.setFormatter(logfire_formatter)
     logger.addHandler(logfire_handler)
+    logfire.configure(environment='local', service_name="CogNetics Architect")  # Configure Logfire
 else:
-    print("LOGFIRE_API_KEY not found. Skipping Logfire integration.")
+    print("Logfire is disabled.")
 
 # **Additional Handlers (Optional)**
 # You can add other handlers like console or file handlers if needed
@@ -136,6 +148,20 @@ console_formatter = logging.Formatter(
 )
 console_handler.setFormatter(console_formatter)
 logger.addHandler(console_handler)
+
+# Initialize the custom logger for patched logs
+logfire_debug_logger = logging.getLogger("logfire_debug")
+logfire_debug_logger.setLevel(logging.DEBUG)
+logfire_debug_logger.propagate = False  # Prevent propagation to root logger
+logfire_debug_handler = logging.StreamHandler()  # Log to the console
+logfire_debug_formatter = logging.Formatter(
+    '{"timestamp": "%(asctime)s", "level": "%(levelname)s", "message": "%(message)s"}'
+)
+logfire_debug_handler.setFormatter(logfire_debug_formatter)
+logfire_debug_logger.addHandler(logfire_debug_handler)
+
+# **Removed Patching of logfire Methods**
+# Instead, use the standard logging module to manage logs
 
 # Redis & Supabase Initialization
 redis = Redis(
@@ -158,7 +184,7 @@ def send_log_message(message: str):
         try:
             asyncio.create_task(client.send_text(message))  # Send log message to client
         except Exception as e:
-            logfire.error(f"Error sending message to WebSocket client: {e}")
+            logger.error(f"Error sending message to WebSocket client: {e}")
 
 # Stop signal
 stop_signal = False
@@ -168,7 +194,7 @@ def chebyshev_distance(x1, y1, x2, y2):
     return max(abs(x1 - x2), abs(y1 - y2))
 
 async def initialize_entities():
-    logfire.info('Resetting simulation state.')
+    logger.info('Resetting simulation state.')
     supabase.table('movements').delete().neq('entity_id', -1).execute()
     supabase.table('entities').delete().neq('id', -1).execute()
 
@@ -185,7 +211,7 @@ async def initialize_entities():
     supabase.table('entities').insert(entities).execute()
     for entity in entities:
         await redis.hset(f'entity:{entity["id"]}', mapping=entity)
-    logfire.info('Entities initialized.')
+    logger.info('Entities initialized.')
     return entities
 
 async def fetch_nearby_messages(entity, entities):
@@ -202,28 +228,29 @@ async def fetch_prompts_from_fastapi():
         if response.status_code == 200:
             return response.json()  # Return the fetched prompts
         else:
-            logfire.warning('Failed to fetch prompts, using default ones.')
+            logger.warning('Failed to fetch prompts, using default ones.')
             return {}  # Return an empty dict to trigger the default prompts
 
 from app.endpoints.api import router as api_router
+# from app.endpoints.api import router as logfire_router  # Commented out as not needed
 
 # Lifespan Context Manager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global stop_signal
-    logfire.info('Starting application lifespan...')
+    logger.info('Starting application lifespan...')
     try:
         # Startup logic
-        logfire.info('Application started!')
+        logger.info('Application started!')
         await redis.ping()
-        logfire.info('Redis connection established.')       
+        logger.info('Redis connection established.')       
         yield
     finally:
         # Shutdown logic
-        logfire.info('Shutting down application...')
+        logger.info('Shutting down application...')
         stop_signal = True  # Ensure simulation stops if running
         await redis.close()
-        logfire.info('Redis connection closed.')
+        logger.info('Redis connection closed.')
 
 # Create FastAPI app with lifespan
 app = FastAPI(
@@ -244,6 +271,7 @@ app.add_middleware(
 
 # Include API Router
 app.include_router(api_router, prefix='/api', tags=['simulation'])
+# app.include_router(logfire_router, prefix='/api/logfire', tags=['logfire'])  # Removed as not needed
 
 # **Inspector Integration (Assuming a Monitoring Tool)**
 # Example: Using FastAPI's built-in middleware or a third-party tool like Prometheus
@@ -254,5 +282,3 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 app.add_middleware(
     TrustedHostMiddleware, allowed_hosts=["*"]
 )
-
-# Additional inspectors can be integrated here as needed
