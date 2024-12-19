@@ -1,8 +1,14 @@
 import os
 from dotenv import load_dotenv
+from loguru_integration import setup_loguru
 
 # Load environment variables
 load_dotenv()
+# Set up Loguru logging
+setup_loguru()
+
+# Proceed with running the app
+from app.main import app
 
 LOGFIRE_ENABLED = os.getenv("LOGFIRE_ENABLED", "false").lower() == "true"
 
