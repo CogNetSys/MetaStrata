@@ -184,7 +184,7 @@ def send_log_message(message: str):
         try:
             asyncio.create_task(client.send_text(message))  # Send log message to client
         except Exception as e:
-            logger.error(f"Error sending message to WebSocket client: {e}")
+            logfire.error(f"Error sending message to WebSocket client: {e}")
 
 # Stop signal
 stop_signal = False
@@ -194,7 +194,7 @@ def chebyshev_distance(x1, y1, x2, y2):
     return max(abs(x1 - x2), abs(y1 - y2))
 
 async def initialize_entities():
-    logger.info('Resetting simulation state.')
+    logfire.info('Resetting simulation state.')
     supabase.table('movements').delete().neq('entity_id', -1).execute()
     supabase.table('entities').delete().neq('id', -1).execute()
 
@@ -211,7 +211,7 @@ async def initialize_entities():
     supabase.table('entities').insert(entities).execute()
     for entity in entities:
         await redis.hset(f'entity:{entity["id"]}', mapping=entity)
-    logger.info('Entities initialized.')
+    logfire.info('Entities initialized.')
     return entities
 
 async def fetch_nearby_messages(entity, entities):
@@ -228,7 +228,7 @@ async def fetch_prompts_from_fastapi():
         if response.status_code == 200:
             return response.json()  # Return the fetched prompts
         else:
-            logger.warning('Failed to fetch prompts, using default ones.')
+            logfire.warning('Failed to fetch prompts, using default ones.')
             return {}  # Return an empty dict to trigger the default prompts
 
 from app.endpoints.api import router as api_router
@@ -238,19 +238,19 @@ from app.endpoints.api import router as api_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global stop_signal
-    logger.info('Starting application lifespan...')
+    logfire.info('Starting application lifespan...')
     try:
         # Startup logic
-        logger.info('Application started!')
+        logfire.info('Application started!')
         await redis.ping()
-        logger.info('Redis connection established.')       
+        logfire.info('Redis connection established.')       
         yield
     finally:
         # Shutdown logic
-        logger.info('Shutting down application...')
+        logfire.info('Shutting down application...')
         stop_signal = True  # Ensure simulation stops if running
         await redis.close()
-        logger.info('Redis connection closed.')
+        logfire.info('Redis connection closed.')
 
 # Create FastAPI app with lifespan
 app = FastAPI(

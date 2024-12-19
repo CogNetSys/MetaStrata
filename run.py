@@ -10,7 +10,7 @@ if LOGFIRE_ENABLED:
     import logfire
     # Configure Logfire before importing other modules
     logfire.configure(environment='local', service_name="CogNetics Architect")
-    logfire.install_auto_tracing(modules=['app'], min_duration=0.01, check_imported_modules='ignore')
+    # logfire.install_auto_tracing(modules=['app'], min_duration=0.01, check_imported_modules='ignore')
     print("Logfire is enabled.")
 else:
     print("Logfire is disabled.")
