@@ -25,13 +25,6 @@ router = APIRouter()
 # Semaphore for throttling concurrent requests
 global_request_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
-# Entity Model (Pydantic)
-class Entity(BaseModel):
-    id: int
-    name: str
-    x: int
-    y: int
-    memory: str = ""  # Default empty memory for new entities
 
 # Helper Functions
 
@@ -147,7 +140,7 @@ async def send_llm_request(prompt, max_retries=3, base_delay=2):
 
 # Simulation API Endpoints
 
-@router.post("/reset_and_initialize")
+@router.post("/reset_and_initialize", tags=["Simulation"])
 async def reset_and_initialize():
     global stop_signal
     stop_signal = False  # Reset stop signal before starting
@@ -157,7 +150,7 @@ async def reset_and_initialize():
         logfire.info("Simulation reset and initialized successfully.")
     return JSONResponse({"status": "Simulation reset and initialized successfully.", "entities": entities})
 
-@router.post("/step")
+@router.post("/step", tags=["Simulation"])
 async def perform_steps(request: StepRequest):
     global stop_signal
     stop_signal = False  # Reset stop signal before starting steps
@@ -326,244 +319,10 @@ async def perform_steps(request: StepRequest):
         logfire.info(f"Completed {request.steps} step(s).")
     return JSONResponse({"status": f"Performed {request.steps} step(s)."})
 
-@router.post("/stop")
+@router.post("/stop", tags=["Simulation"])
 async def stop_simulation():
     global stop_signal
     stop_signal = True
     if LOGFIRE_ENABLED:
         logfire.info("Stop signal triggered.")
     return JSONResponse({"status": "Simulation stopping."})
-
-@router.post("/entities", response_model=Entity)
-async def create_entity(entity: Entity):
-    # Create entity data in Redis
-    await redis.hset(f"entity:{entity.id}", mapping=entity.dict())
-    if LOGFIRE_ENABLED:
-        logfire.info(f"Entity {entity.id} created in Redis.")
-
-    # Optionally, store entity in Supabase for persistent storage
-    supabase.table("entities").insert(entity.dict()).execute()
-    if LOGFIRE_ENABLED:
-        logfire.info(f"Entity {entity.id} stored in Supabase.")
-        
-    return entity
-
-@router.get("/entities/{entity_id}", response_model=Entity)
-async def get_entity(entity_id: int):
-    # Fetch entity data from Redis
-    entity_data = await redis.hgetall(f"entity:{entity_id}")
-    if not entity_data:
-        if LOGFIRE_ENABLED:
-            logfire.error(f"Entity {entity_id} not found.")
-        raise HTTPException(status_code=404, detail="Entity not found")
-    
-    # Convert Redis data into an Entity model (ensure proper types are cast)
-    try:
-        entity = Entity(
-            id=int(entity_data["id"]),
-            name=entity_data["name"],
-            x=int(entity_data["x"]),
-            y=int(entity_data["y"]),
-            memory=entity_data.get("memory", "")
-        )
-        if LOGFIRE_ENABLED:
-            logfire.debug(f"Entity {entity_id} retrieved from Redis.")
-        return entity
-    except (KeyError, ValueError) as e:
-        if LOGFIRE_ENABLED:
-            logfire.error(f"Error parsing entity {entity_id} data: {e}")
-        raise HTTPException(status_code=500, detail="Error retrieving entity data")
-
-@router.put("/entities/{entity_id}", response_model=Entity)
-async def update_entity(entity_id: int, entity: Entity):
-    # Update entity data in Redis
-    await redis.hset(f"entity:{entity_id}", mapping=entity.dict())
-    if LOGFIRE_ENABLED:
-        logfire.info(f"Entity {entity_id} updated in Redis.")
-
-    # Optionally, update entity in Supabase for persistent storage
-    supabase.table("entities").update(entity.dict()).eq("id", entity_id).execute()
-    if LOGFIRE_ENABLED:
-        logfire.info(f"Entity {entity_id} updated in Supabase.")
-        
-    return entity
-
-@router.post("/entities/{entity_id}/send_message")
-async def send_message(entity_id: int, message: str):
-    # Get the entity's current position and details
-    entity_data = await redis.hgetall(f"entity:{entity_id}")
-    if not entity_data:
-        if LOGFIRE_ENABLED:
-            logfire.error(f"Entity {entity_id} not found for sending message.")
-        raise HTTPException(status_code=404, detail="Entity not found")
-    
-    # Save the message in Redis for the entity
-    await redis.hset(f"entity:{entity_id}", "message", message)
-    if LOGFIRE_ENABLED:
-        logfire.info(f"Message sent by Entity {entity_id}: {message}")
-    
-    return {"status": "Message sent successfully", "message": message}
-
-@router.delete("/entities/{entity_id}")
-async def delete_entity(entity_id: int):
-    # Delete entity from Redis
-    deleted = await redis.delete(f"entity:{entity_id}")
-    if deleted:
-        if LOGFIRE_ENABLED:
-            logfire.info(f"Entity {entity_id} deleted from Redis.")
-    else:
-        if LOGFIRE_ENABLED:
-            logfire.error(f"Attempted to delete non-existent Entity {entity_id} from Redis.")
-    
-    # Optionally, delete entity from Supabase
-    supabase.table("entities").delete().eq("id", entity_id).execute()
-    if LOGFIRE_ENABLED:
-        logfire.info(f"Entity {entity_id} deleted from Supabase.")
-    
-    return {"status": "Entity deleted successfully"}
-
-@router.get("/entities/{entity_id}/nearby", response_model=List[Entity])
-async def get_nearby_entities(entity_id: int):
-    # Get the entity's position from Redis
-    entity_data = await redis.hgetall(f"entity:{entity_id}")
-    if not entity_data:
-        if LOGFIRE_ENABLED:
-            logfire.error(f"Entity {entity_id} not found for fetching nearby entities.")
-        raise HTTPException(status_code=404, detail="Entity not found")
-
-    try:
-        entity = Entity(
-            id=int(entity_data["id"]),
-            name=entity_data["name"],
-            x=int(entity_data["x"]),
-            y=int(entity_data["y"]),
-            memory=entity_data.get("memory", "")
-        )
-    except (KeyError, ValueError) as e:
-        if LOGFIRE_ENABLED:
-            logfire.error(f"Error parsing entity {entity_id} data: {e}")
-        raise HTTPException(status_code=500, detail="Error retrieving entity data")
-
-    # Fetch all entities except the current one
-    all_entities = []
-    for i in range(NUM_ENTITIES):
-        if i != entity_id:
-            entity_info = await redis.hgetall(f"entity:{i}")
-            if entity_info and all(k in entity_info for k in ["id", "name", "x", "y"]):
-                try:
-                    nearby_entity = Entity(
-                        id=int(entity_info["id"]),
-                        name=entity_info["name"],
-                        x=int(entity_info["x"]),
-                        y=int(entity_info["y"]),
-                        memory=entity_info.get("memory", "")
-                    )
-                    all_entities.append(nearby_entity)
-                except (KeyError, ValueError) as e:
-                    if LOGFIRE_ENABLED:
-                        logfire.error(f"Missing or invalid data for entity {i}: {e}. Skipping.")
-            else:
-                if LOGFIRE_ENABLED:
-                    logfire.error(f"Missing or incomplete data for entity {i}. Skipping.")
-
-    # Filter nearby entities based on Chebyshev distance
-    nearby_entities = [
-        a for a in all_entities
-        if chebyshev_distance(entity.x, entity.y, a.x, a.y) <= CHEBYSHEV_DISTANCE
-    ]
-
-    if LOGFIRE_ENABLED:
-        logfire.debug(f"Fetched {len(nearby_entities)} nearby entities for Entity {entity_id}.")
-    return nearby_entities
-
-@router.post("/sync_entities")
-async def sync_entities():
-    all_entities = []
-    for i in range(NUM_ENTITIES):
-        entity_data = await redis.hgetall(f"entity:{i}")
-        if entity_data and all(k in entity_data for k in ["id", "name", "x", "y"]):
-            try:
-                entity = Entity(
-                    id=int(entity_data["id"]),
-                    name=entity_data["name"],
-                    x=int(entity_data["x"]),
-                    y=int(entity_data["y"]),
-                    memory=entity_data.get("memory", "")
-                )
-                all_entities.append(entity)
-            except (KeyError, ValueError) as e:
-                if LOGFIRE_ENABLED:
-                    logfire.error(f"Error parsing entity {i} data: {e}. Skipping.")
-        else:
-            if LOGFIRE_ENABLED:
-                logfire.error(f"Missing or incomplete data for entity {i}. Skipping.")
-
-    for entity in all_entities:
-        supabase.table("entities").upsert(entity.dict()).execute()
-        if LOGFIRE_ENABLED:
-            logfire.info(f"Entity {entity.id} synchronized to Supabase.")
-
-    if LOGFIRE_ENABLED:
-        logfire.info("All entities synchronized between Redis and Supabase.")
-    return {"status": "Entities synchronized between Redis and Supabase"}
-
-@router.get("/settings", response_model=SimulationSettings)
-async def get_settings():
-    settings = SimulationSettings(
-        grid_size=GRID_SIZE,
-        num_entities=NUM_ENTITIES,
-        max_steps=MAX_STEPS,
-        chebyshev_distance=CHEBYSHEV_DISTANCE,
-        llm_model=LLM_MODEL,
-        llm_max_tokens=LLM_MAX_TOKENS,
-        llm_temperature=LLM_TEMPERATURE,
-        request_delay=REQUEST_DELAY,
-        max_concurrent_requests=MAX_CONCURRENT_REQUESTS
-    )
-    if LOGFIRE_ENABLED:
-        logfire.debug("Simulation settings retrieved.")
-    return settings
-
-@router.post("/settings", response_model=SimulationSettings)
-async def set_settings(settings: SimulationSettings):
-    global GRID_SIZE, NUM_ENTITIES, MAX_STEPS, CHEBYSHEV_DISTANCE, LLM_MODEL
-    global LLM_MAX_TOKENS, LLM_TEMPERATURE, REQUEST_DELAY, MAX_CONCURRENT_REQUESTS
-
-    GRID_SIZE = settings.grid_size
-    NUM_ENTITIES = settings.num_entities
-    MAX_STEPS = settings.max_steps
-    CHEBYSHEV_DISTANCE = settings.chebyshev_distance
-    LLM_MODEL = settings.llm_model
-    LLM_MAX_TOKENS = settings.llm_max_tokens
-    LLM_TEMPERATURE = settings.llm_temperature
-    REQUEST_DELAY = settings.request_delay
-    MAX_CONCURRENT_REQUESTS = settings.max_concurrent_requests
-
-    if LOGFIRE_ENABLED:
-        logfire.info("Simulation settings updated.")
-    return settings
-
-# Endpoint to get current prompt templates
-@router.get("/prompts", response_model=PromptSettings)
-async def get_prompts():
-    prompts = PromptSettings(
-        message_generation_prompt=DEFAULT_MESSAGE_GENERATION_PROMPT,
-        memory_generation_prompt=DEFAULT_MEMORY_GENERATION_PROMPT,
-        movement_generation_prompt=DEFAULT_MOVEMENT_GENERATION_PROMPT
-    )
-    if LOGFIRE_ENABLED:
-        logfire.debug("Prompt templates retrieved.")
-    return prompts
-
-# Endpoint to set new prompt templates
-@router.post("/prompts", response_model=PromptSettings)
-async def set_prompts(prompts: PromptSettings):
-    global DEFAULT_MESSAGE_GENERATION_PROMPT, DEFAULT_MEMORY_GENERATION_PROMPT, DEFAULT_MOVEMENT_GENERATION_PROMPT
-
-    DEFAULT_MESSAGE_GENERATION_PROMPT = prompts.message_generation_prompt
-    DEFAULT_MEMORY_GENERATION_PROMPT = prompts.memory_generation_prompt
-    DEFAULT_MOVEMENT_GENERATION_PROMPT = prompts.movement_generation_prompt
-
-    if LOGFIRE_ENABLED:
-        logfire.info("Prompt templates updated.")
-    return prompts

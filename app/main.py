@@ -212,7 +212,7 @@ async def fetch_prompts_from_fastapi():
             logfire.warning('Failed to fetch prompts, using default ones.')
             return {}  # Return an empty dict to trigger the default prompts
 
-from app.endpoints.api import router as api_router
+from app.endpoints import router
 # from app.endpoints.api import router as logfire_router  # Commented out as not needed
 
 # Lifespan Context Manager
@@ -251,8 +251,7 @@ app.add_middleware(
 )
 
 # Include API Router
-app.include_router(api_router, prefix='/api', tags=['simulation'])
-# app.include_router(logfire_router, prefix='/api/logfire', tags=['logfire'])  # Removed as not needed
+app.include_router(router)
 
 # **Inspector Integration (Assuming a Monitoring Tool)**
 # Example: Using FastAPI's built-in middleware or a third-party tool like Prometheus

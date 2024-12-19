@@ -5,10 +5,11 @@ import logfire
 
 # Import shared models and constants
 from app.models import SimulationSettings, PromptSettings, LOGFIRE_ENABLED
+from app.main import GRID_SIZE, NUM_ENTITIES, MAX_STEPS, CHEBYSHEV_DISTANCE, LLM_MODEL, LLM_MAX_TOKENS, LLM_TEMPERATURE, REQUEST_DELAY, MAX_CONCURRENT_REQUESTS, DEFAULT_MEMORY_GENERATION_PROMPT, DEFAULT_MESSAGE_GENERATION_PROMPT, DEFAULT_MOVEMENT_GENERATION_PROMPT
 
 router = APIRouter()
 
-@router.get("/settings", response_model=SimulationSettings)
+@router.get("/settings", response_model=SimulationSettings, tags=["Customization"])
 async def get_settings():
     settings = SimulationSettings(
         grid_size=GRID_SIZE,
@@ -25,7 +26,7 @@ async def get_settings():
         logfire.debug("Simulation settings retrieved.")
     return settings
 
-@router.post("/settings", response_model=SimulationSettings)
+@router.post("/settings", response_model=SimulationSettings, tags=["Customization"])
 async def set_settings(settings: SimulationSettings):
     global GRID_SIZE, NUM_ENTITIES, MAX_STEPS, CHEBYSHEV_DISTANCE, LLM_MODEL
     global LLM_MAX_TOKENS, LLM_TEMPERATURE, REQUEST_DELAY, MAX_CONCURRENT_REQUESTS
@@ -44,7 +45,7 @@ async def set_settings(settings: SimulationSettings):
         logfire.info("Simulation settings updated.")
     return settings
 
-@router.get("/prompts", response_model=PromptSettings)
+@router.get("/prompts", response_model=PromptSettings, tags=["Customization"])
 async def get_prompts():
     prompts = PromptSettings(
         message_generation_prompt=DEFAULT_MESSAGE_GENERATION_PROMPT,
@@ -55,7 +56,7 @@ async def get_prompts():
         logfire.debug("Prompt templates retrieved.")
     return prompts
 
-@router.post("/prompts", response_model=PromptSettings)
+@router.post("/prompts", response_model=PromptSettings, tags=["Customization"])
 async def set_prompts(prompts: PromptSettings):
     global DEFAULT_MESSAGE_GENERATION_PROMPT, DEFAULT_MEMORY_GENERATION_PROMPT, DEFAULT_MOVEMENT_GENERATION_PROMPT
 
