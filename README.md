@@ -1,4 +1,166 @@
-Principle - Keep It Simple But Not One Step Too Simple
+Sure! Here is the updated markdown document without the triple backticks:
+
+# CogNetics Architect
+
+## Overview
+
+CogNetics Architect is an advanced simulation platform designed to model interactions among multiple entities within a grid environment. Leveraging FastAPI for the backend, Redis for in-memory data storage, Supabase for persistent storage, and Logfire for logging and monitoring, this application provides a robust framework for simulating complex systems.
+
+## Features
+
+- **Configuration Management:** Utilizes Pydantic for structured and validated configuration management, ensuring type safety and maintainability.
+- **Simulation Control:** API endpoints to reset, initialize, perform steps, and stop the simulation.
+- **Entity Management:** Manages entities with positions and memory, allowing interactions based on proximity.
+- **Logging and Monitoring:** Integrates Logfire for comprehensive logging and monitoring without altering existing Logfire setup.
+- **Concurrency Control:** Manages concurrent requests to prevent rate limiting and ensure system stability.
+- **WebSocket Support:** Enables real-time communication with connected clients.
+
+## Configuration
+
+Configuration is managed using Pydantic models within `main.py`, leveraging inheritance and nesting for a structured setup. Sensitive information is handled using `SecretStr` to ensure security.
+
+### Existing Environment Variables
+
+The application continues to use environment variables defined in your `.env` file for configuration. Ensure the following environment variables are set:
+
+#### **Database Configuration**
+- `SUPABASE_URL`
+- `SUPABASE_KEY`
+
+#### **API Configuration**
+- `GROQ_API_KEY`
+- `GROQ_API_ENDPOINT`
+
+#### **Redis Configuration**
+- `REDIS_ENDPOINT`
+- `REDIS_PASSWORD`
+
+#### **Authentication**
+- `AUTH_TOKEN`
+- `E2B_API_KEY`
+
+#### **Logfire Configuration**
+- `LOGFIRE_API_KEY`
+- `LOGFIRE_ENDPOINT`
+- `LOGFIRE_ENABLED` (set to `true` or `false`)
+
+#### **Simulation Settings**
+- `GRID_SIZE` (default: `15`)
+- `NUM_ENTITIES` (default: `3`)
+- `MAX_STEPS` (default: `100`)
+- `CHEBYSHEV_DISTANCE` (default: `5.0`)
+- `LLM_MODEL` (default: `"llama-3.3-70b-versatile"`)
+- `LLM_MAX_TOKENS` (default: `2048`)
+- `LLM_TEMPERATURE` (default: `0.7`)
+- `REQUEST_DELAY` (default: `1.2`)
+- `MAX_CONCURRENT_REQUESTS` (default: `5`)
+- `LOG_LEVEL` (default: `"DEBUG"`)
+
+## Pydantic Settings Structure
+
+Configurations are organized using nested Pydantic models for better structure and inheritance. The `Settings` class aggregates all configuration sections.
+
+class Settings(BaseModel):
+    database: DatabaseSettings
+    api: APISettings
+    redis: RedisSettings
+    auth: AuthSettings
+    logfire: LogfireSettings
+    simulation: SimulationSettingsModel
+
+## Masking Sensitive Information
+
+All sensitive environment variables are managed using Pydantic's `SecretStr`. When accessing these variables, use the `.get_secret_value()` method to retrieve their actual values securely.
+
+supabase_key = settings.database.supabase_key.get_secret_value()
+
+Avoid logging or printing sensitive information directly. If necessary, mask them before logging.
+
+def mask_secret(secret: SecretStr) -> str:
+    return "***"
+
+# Example
+logfire.info(f"Supabase Key: {mask_secret(settings.database.supabase_key)}")
+
+---
+
+## Installation
+
+### Clone the Repository
+
+git clone https://github.com/CogNetSys/cognetics-architect.git  
+cd cognetics-architect
+
+### Create a Virtual Environment
+
+python3 -m venv venv  
+source venv/bin/activate
+
+### Install Dependencies
+
+pip install -r requirements.txt
+
+### Configure Environment Variables
+
+Create a `.env` file in the root directory and populate it with the necessary environment variables as outlined above.
+
+### Run the Application
+
+python run.py  
+The application will be accessible at `http://0.0.0.0:8000`.
+
+---
+
+## API Endpoints
+
+### Simulation
+
+#### **Reset and Initialize Simulation**
+- **Endpoint:** `/reset_and_initialize`
+- **Method:** `POST`
+- **Description:** Resets the simulation state and initializes entities.
+
+#### **Perform Steps**
+- **Endpoint:** `/step`
+- **Method:** `POST`
+- **Description:** Performs a specified number of simulation steps.
+
+#### **Stop Simulation**
+- **Endpoint:** `/stop`
+- **Method:** `POST`
+- **Description:** Stops the ongoing simulation.
+
+---
+
+## Logging
+
+Logging is handled by Logfire, which captures and manages logs based on the configuration provided. Ensure that `LOGFIRE_ENABLED` is set to `true` in your `.env` file to enable logging.
+
+---
+
+## Security
+
+- **Sensitive Information:** All sensitive configurations are managed using `SecretStr` to prevent accidental exposure.
+- **`.env` Protection:** The `.env` file is excluded from version control via `.gitignore` to protect sensitive data.
+
+---
+
+## Contributing
+
+Contributions are welcome! Please fork the repository and submit a pull request for any enhancements or bug fixes.
+
+---
+
+## License
+
+This project is licensed under the MIT License. See the LICENSE file for details.
+
+---
+
+Let me know if you'd like any further changes!
+
+
+## Principle - Keep It Simple But Not One Step Too Simple
 
 ToDo
 - Batch Processing
