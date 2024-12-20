@@ -4,7 +4,7 @@ import httpx
 import logfire
 import logging
 from app.config import settings
-from app.database import redis
+from app.utils.database import redis
 from app.endpoints import router as endpoints_router
 from contextlib import asynccontextmanager
 from fastapi import FastAPI

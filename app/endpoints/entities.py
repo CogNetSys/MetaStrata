@@ -2,8 +2,8 @@
 
 import logfire
 from app.config import Settings, settings, calculate_chebyshev_distance
-from app.database import redis, supabase
-from app.models import Entity
+from app.utils.database import redis, supabase
+from app.utils.models import Entity
 from fastapi import APIRouter, HTTPException
 from typing import List
 

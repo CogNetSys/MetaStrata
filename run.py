@@ -15,7 +15,7 @@ if settings.LOGFIRE.LOGFIRE_ENABLED:
     )
 
     # Install auto-tracing for the 'app' module (or any other modules you want to trace)
-    logfire.install_auto_tracing(modules=['app'], min_duration=0.01, check_imported_modules='ignore')
+    # logfire.install_auto_tracing(modules=['app'], min_duration=0.01, check_imported_modules='ignore')
 
     print("Logfire is enabled.")
 else:

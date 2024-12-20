@@ -9,8 +9,8 @@ from typing import List
 
 import logfire
 from app.config import Settings, settings, calculate_chebyshev_distance
-from app.database import redis, supabase
-from app.models import Entity, StepRequest, initialize_entities, fetch_prompts_from_fastapi, fetch_nearby_messages
+from app.utils.database import redis, supabase
+from app.utils.models import Entity, StepRequest, initialize_entities, fetch_prompts_from_fastapi, fetch_nearby_messages
 
 router = APIRouter()
 

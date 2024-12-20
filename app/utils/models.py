@@ -6,7 +6,7 @@ import random
 from typing import List
 
 from app.config import Settings, settings, calculate_chebyshev_distance
-from app.database import redis, supabase
+from app.utils.database import redis, supabase
 from pydantic import BaseModel
 
 

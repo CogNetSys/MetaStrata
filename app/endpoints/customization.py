@@ -3,7 +3,7 @@
 from fastapi import APIRouter
 import logfire
 from app.config import settings
-from app.models import PromptSettings
+from app.utils.models import PromptSettings
 
 router = APIRouter()
 
