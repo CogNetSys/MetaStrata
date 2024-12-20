@@ -11,6 +11,7 @@ from app.config import settings
 from app.database import redis
 from app.endpoints import router as endpoints_router
 import logfire
+from logfire_integration import setup_loguru
 
 # Structured Logging with Logfire
 class LogfireHandler(logging.Handler):
@@ -83,6 +84,12 @@ async def lifespan(app: FastAPI):
     global stop_signal
     if settings.LOGFIRE.LOGFIRE_ENABLED:
         logfire.info('Starting application lifespan...')
+    
+    # Loguru setup can be added here if needed
+    setup_loguru()
+    if settings.LOGFIRE.LOGFIRE_ENABLED:
+        logfire.debug("Loguru initialized.")
+
     try:
         # Startup logic
         if settings.LOGFIRE.LOGFIRE_ENABLED:
