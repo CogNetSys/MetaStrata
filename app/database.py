@@ -1,3 +1,5 @@
+# /app/database.py
+
 import os  # Add this import
 from redis.asyncio import Redis
 from supabase import create_client, Client

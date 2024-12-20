@@ -1,14 +1,20 @@
+# /app/config.py
+
 import os
 from dotenv import load_dotenv
 from pydantic import SecretStr
 
 load_dotenv()
 
+# --------------------------------------------------------
+# MODIFIABLE PROPERTIES - These attributes are modifiable
+# --------------------------------------------------------
+    
 class DatabaseSettings:
     SUPABASE_KEY: SecretStr = SecretStr(os.getenv("SUPABASE_KEY"))
     SUPABASE_URL: str = os.getenv("SUPABASE_URL")
 
-class APISettings:
+class GROQSettings:
     GROQ_API_ENDPOINT: str = os.getenv("GROQ_API_ENDPOINT", "https://api.groq.com/openai/v1/chat/completions")
     GROQ_API_KEY: SecretStr = SecretStr(os.getenv("GROQ_API_KEY"))
 
@@ -17,7 +23,7 @@ class RedisSettings:
     REDIS_PASSWORD: SecretStr = SecretStr(os.getenv("REDIS_PASSWORD"))
 
 class AuthSettings:
-    AUTH_TOKEN: str = os.getenv("AUTH_TOKEN")
+    AUTH_TOKEN: SecretStr = SecretStr(os.getenv("AUTH_TOKEN"))
     E2B_API_KEY: SecretStr = SecretStr(os.getenv("E2B_API_KEY"))
 
 class LogfireSettings:
@@ -29,13 +35,13 @@ class SimulationSettings:
     CHEBYSHEV_DISTANCE: float = float(os.getenv("CHEBYSHEV_DISTANCE", 5.0))  # Default: 5.0
     GRID_SIZE: int = int(os.getenv("GRID_SIZE", 15))  # Default: 15
     LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", 2048))  # Default: 2048
-    LLM_MODEL: str = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")  # Default: "llama-3.3-70b-versatile"
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")  # Default: "llama-3.3-70b-versatile"
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", 0.7))  # Default: 0.7
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "DEBUG")  # Default: "DEBUG"
     MAX_CONCURRENT_REQUESTS: int = int(os.getenv("MAX_CONCURRENT_REQUESTS", 5))  # Default: 5
     MAX_STEPS: int = int(os.getenv("MAX_STEPS", 100))  # Default: 100
     NUM_ENTITIES: int = int(os.getenv("NUM_ENTITIES", 3))  # Default: 3
-    REQUEST_DELAY: float = float(os.getenv("REQUEST_DELAY", 1.2))  # Default: 1.2
+    REQUEST_DELAY: float = float(os.getenv("REQUEST_DELAY", 2.3))  # Default: 1.2
 
     DEFAULT_MESSAGE_GENERATION_PROMPT: str = """
     You are lifeform{entityId} at position ({x}, {y}). {grid_description} 
@@ -59,6 +65,10 @@ class SimulationSettings:
     Based on the above, choose your next move. Respond with only one of the following options, and nothing else: "x+1", "x-1", "y+1", "y-1", or "stay".
     Do not provide any explanation or additional text.
     """
+
+    # ------------------------------------------------------
+    # READ ONLY PROPERTIES - Make these attributes read-only
+    # ------------------------------------------------------
 
     @property
     def chebyshev_distance(self) -> float:
@@ -117,7 +127,7 @@ class SimulationSettings:
         return self.DEFAULT_MOVEMENT_GENERATION_PROMPT
 
 class Settings:
-    API: APISettings = APISettings()
+    GROQ: GROQSettings = GROQSettings()
     AUTH: AuthSettings = AuthSettings()
     DATABASE: DatabaseSettings = DatabaseSettings()
     LOGFIRE: LogfireSettings = LogfireSettings()
@@ -127,6 +137,7 @@ class Settings:
 # Create a global settings object
 settings = Settings()
 
+# Leave this here to prevent circular imports please, I knkow it's not the best place. Whatever.
 def calculate_chebyshev_distance(x1: int, y1: int, x2: int, y2: int) -> int:
     """
     Calculate the Chebyshev distance between two points.

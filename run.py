@@ -1,3 +1,5 @@
+# /run.py
+
 import logfire
 from logfire_integration import setup_loguru
 from app.config import Settings, settings
@@ -8,12 +10,12 @@ setup_loguru()
 # Initialize Logfire configuration (before running the app)
 if settings.LOGFIRE.LOGFIRE_ENABLED:
     logfire.configure(
-        environment="local",  # Replace with your environment
-        service_name="CogNetics Architect"
+        environment="local",
+        service_name="CogNetics Architect",
     )
 
     # Install auto-tracing for the 'app' module (or any other modules you want to trace)
-    # logfire.install_auto_tracing(modules=['app'], min_duration=0.001, check_imported_modules='ignore')
+    logfire.install_auto_tracing(modules=['app'], min_duration=0.01, check_imported_modules='ignore')
 
     print("Logfire is enabled.")
 else:

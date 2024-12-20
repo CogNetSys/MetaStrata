@@ -18,10 +18,10 @@ def setup_loguru():
     logger.add("logs/application.log", rotation="10 MB", retention="10 days", compression="zip", backtrace=True, diagnose=True)
 
     # Optionally, log to console
-    logger.add(sys.stdout, format="{time} {level} {message}", level="DEBUG")
+    logger.add(sys.stdout, format="{time} {level} {message}", level="INFO")
 
     # Attach InterceptHandler to Python's root logger
-    logging.basicConfig(handlers=[InterceptHandler()], level=logging.DEBUG)
+    logging.basicConfig(handlers=[InterceptHandler()], level=logging.INFO)
 
     # Optional: Redirect specific loggers to Loguru
     logging.getLogger("fastapi").handlers = [InterceptHandler()]

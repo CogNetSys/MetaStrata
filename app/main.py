@@ -1,24 +1,32 @@
+# /app/main.py
+
 import httpx
+import logfire
 import logging
-from contextlib import asynccontextmanager
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from pydantic import SecretStr
-from redis.asyncio import Redis
-from supabase import create_client, Client
 from app.config import settings
 from app.database import redis
 from app.endpoints import router as endpoints_router
-import logfire
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from logfire_integration import setup_loguru
+from pydantic import SecretStr
+from redis.asyncio import Redis
+from supabase import create_client, Client
+
+# Stop signal
+stop_signal = False
+
+# ----------------------------------------------
+# LOGGING SECTION
+# ----------------------------------------------
 
 # Structured Logging with Logfire
 class LogfireHandler(logging.Handler):
     def __init__(self, api_key: SecretStr):
         super().__init__()
         self.api_key = api_key.get_secret_value()
-        self.endpoint = "https://logfire.pydantic.dev/cognetsys/cognetics-architect/logs"  # Replace with actual Logfire endpoint
+        self.endpoint = "https://logfire.pydantic.dev/cognetsys/cognetics-architect/logs"
 
     def emit(self, record):
         log_entry = self.format(record)
@@ -75,8 +83,10 @@ logfire_debug_formatter = logging.Formatter(
 logfire_debug_handler.setFormatter(logfire_debug_formatter)
 logfire_debug_logger.addHandler(logfire_debug_handler)
 
-# Stop signal
-stop_signal = False
+
+# ----------------------------------------------
+# LIFESPAN SECTION
+# ----------------------------------------------
 
 # Lifespan Context Manager
 @asynccontextmanager
@@ -107,6 +117,10 @@ async def lifespan(app: FastAPI):
         if settings.LOGFIRE.LOGFIRE_ENABLED:
             logfire.info('Redis connection closed.')
 
+# ----------------------------------------------
+# FASTAPI SECTION
+# ----------------------------------------------
+
 # Create FastAPI app with lifespan
 app = FastAPI(
     title="CogNetics Architect", 
@@ -126,11 +140,3 @@ app.add_middleware(
 
 # Include API Router
 app.include_router(endpoints_router)
-
-# **Inspector Integration (Assuming a Monitoring Tool)**
-# Example: Using FastAPI's built-in middleware or a third-party tool like Prometheus
-# Here, we'll add a simple middleware for request inspection
-
-app.add_middleware(
-    TrustedHostMiddleware, allowed_hosts=["*"]
-)

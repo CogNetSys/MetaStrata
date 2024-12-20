@@ -1,3 +1,5 @@
+# /logfire_integration.py
+
 from loguru import logger
 import logging
 import sys

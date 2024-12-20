@@ -1,3 +1,5 @@
+# /app/endpoints/simulation.py
+
 import asyncio
 import httpx
 import logging
@@ -12,16 +14,17 @@ from app.models import Entity, StepRequest, initialize_entities, fetch_prompts_f
 
 router = APIRouter()
 
-# Use `settings.SIMULATION.chebyshev_distance` where needed
 chebyshev_distance = settings.SIMULATION.CHEBYSHEV_DISTANCE
 
 # Global variable to track connected WebSocket clients
-connected_clients: List[WebSocket] = []
+# connected_clients: List[WebSocket] = []
 
 # Semaphore for throttling concurrent requests
 global_request_semaphore = asyncio.Semaphore(settings.SIMULATION.MAX_CONCURRENT_REQUESTS)
 
-# Helper Functions
+# -------------------------------------------------------------
+# HELPER FUNCTIONS SECTION
+# -------------------------------------------------------------
 
 def get_simulation_settings():
     return settings.SIMULATION
@@ -36,6 +39,10 @@ def construct_prompt(template, entity, messages):
         messages=messages_str,
         distance=settings.SIMULATION.CHEBYSHEV_DISTANCE
     )
+
+# -------------------------------------------------------------
+# LOGGING SECTION
+# -------------------------------------------------------------
 
 # Configure Python's logging
 logging.basicConfig(level=settings.SIMULATION.LOG_LEVEL)
@@ -55,6 +62,10 @@ def patched_debug(message, *args, **kwargs):
 # Patch logfire.debug
 logfire.debug = patched_debug
 
+# -------------------------------------------------------------
+# FUNCTIONS SECTION
+# -------------------------------------------------------------
+
 async def send_llm_request(prompt, max_retries=3, base_delay=2):
     global stop_signal
     async with global_request_semaphore:
@@ -64,7 +75,7 @@ async def send_llm_request(prompt, max_retries=3, base_delay=2):
             return {"message": "", "memory": "", "movement": "stay"}
 
         headers = {
-            'Authorization': f'Bearer {settings.API.GROQ_API_KEY.get_secret_value()}',
+            'Authorization': f'Bearer {settings.GROQ.GROQ_API_KEY.get_secret_value()}',
             'Content-Type': 'application/json'
         }
         body = {
@@ -78,7 +89,7 @@ async def send_llm_request(prompt, max_retries=3, base_delay=2):
         while attempt <= max_retries:
             try:
                 async with httpx.AsyncClient() as client:
-                    response = await client.post(settings.API.GROQ_API_ENDPOINT, headers=headers, json=body)
+                    response = await client.post(settings.GROQ.GROQ_API_ENDPOINT, headers=headers, json=body)
                     if response.status_code == 429:
                         attempt += 1
                         if attempt > max_retries:
@@ -133,7 +144,9 @@ async def send_llm_request(prompt, max_retries=3, base_delay=2):
                     logfire.error(f"Error during LLM request: {e}")
                 return {"message": "", "memory": "", "movement": "stay"}
 
-# Simulation API Endpoints
+# -------------------------------------------------------------
+# SIMULATION ENDPOINTS SECTION
+# -------------------------------------------------------------
 
 @router.post("/reset_and_initialize", tags=["Simulation"])
 async def reset_and_initialize():

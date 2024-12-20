@@ -1,3 +1,5 @@
+# /app/endpoints/__init__.py
+
 from fastapi import APIRouter
 from .simulation import router as simulation_router
 from .customization import router as customization_router
