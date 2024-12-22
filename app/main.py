@@ -1,76 +1,19 @@
 # /app/main.py
 
-import httpx
 import logfire
-import logging
 from app.config import settings
+from app.utils.logging import setup_logging
 from app.utils.database import redis
 from app.endpoints import router as endpoints_router
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from logfire_integration import setup_loguru
-from pydantic import SecretStr
-from redis.asyncio import Redis
-from supabase import create_client, Client
 
 # Stop signal
 stop_signal = False
 
-# ----------------------------------------------
-# LOGGING SECTION
-# ----------------------------------------------
-
-# Structured Logging with Logfire
-class LogfireHandler(logging.Handler):
-    def __init__(self, api_key: SecretStr):
-        super().__init__()
-        self.api_key = api_key.get_secret_value()
-        self.endpoint = "https://logfire.pydantic.dev/cognetsys/cognetics-architect/logs"
-
-    def emit(self, record):
-        log_entry = self.format(record)
-        try:
-            # Send log to Logfire
-            httpx.post(
-                self.endpoint,
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json"
-                },
-                data=log_entry
-            )
-        except Exception as e:
-            print(f"Failed to send log to Logfire: {e}")
-
-# Configure Logger
-logger = logging.getLogger('simulation_app')
-logger.setLevel(settings.SIMULATION.LOG_LEVEL)
-logger.propagate = False  # Prevent duplicate logs
-
-# Initialize logfire_handler as None
-logfire_handler = LogfireHandler(settings.LOGFIRE.LOGFIRE_API_KEY)
-
-# Logfire Handler
-if settings.LOGFIRE.LOGFIRE_ENABLED and settings.LOGFIRE.LOGFIRE_API_KEY:
-    logfire_handler = LogfireHandler(settings.LOGFIRE.LOGFIRE_API_KEY)
-    logfire_formatter = logging.Formatter(
-        '{"timestamp": "%(asctime)s", "level": "%(levelname)s", "message": "%(message)s", "module": "%(module)s", "line": "%(lineno)d"}'
-    )
-    logfire_handler.setFormatter(logfire_formatter)
-    logger.addHandler(logfire_handler)
-    logfire.configure(environment='local', service_name="CogNetics Architect")  # Configure Logfire
-else:
-    print("Logfire is disabled.")
-
-# **Additional Handlers (Optional)**
-# You can add other handlers like console or file handlers if needed
-console_handler = logging.StreamHandler()
-console_formatter = logging.Formatter(
-    '{"timestamp": "%(asctime)s", "level": "%(levelname)s", "message": "%(message)s", "module": "%(module)s", "line": "%(lineno)d"}'
-)
-console_handler.setFormatter(console_formatter)
-logger.addHandler(console_handler)
+# LOGGING SETUP
+logger = setup_logging()
 
 # ----------------------------------------------
 # LIFESPAN SECTION

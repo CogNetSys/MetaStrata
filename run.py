@@ -8,7 +8,7 @@ from app.config import Settings, settings
 setup_loguru()
 
 # Initialize Logfire configuration (before running the app)
-if settings.LOGFIRE.LOGFIRE_ENABLED:
+if settings.LOGFIRE.logfire_enabled:
     logfire.configure(
         environment="local",
         service_name="CogNetics Architect",

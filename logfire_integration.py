@@ -19,6 +19,7 @@ def setup_loguru():
     # Add Loguru handler to log to a file
     logger.add(
         "logs/application.log",
+        serialize=True,
         rotation="10 MB",
         retention="10 days",
         compression="zip",
