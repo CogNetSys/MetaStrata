@@ -6,11 +6,15 @@ from pydantic_settings import BaseSettings
 # --------------------------------------------------------
 
 class DatabaseSettings(BaseSettings):
-    SUPABASE_KEY: SecretStr = Field(..., env="SUPABASE_KEY")  # Required field
-    SUPABASE_URL: str = Field(..., env="SUPABASE_URL")  # Required field
+    SUPABASE_KEY: SecretStr = Field(..., env="SUPABASE_KEY")
+    SUPABASE_URL: str = Field(..., env="SUPABASE_URL")
+    use_ssl: bool = Field(False, env="USE_SSL")  # Optional extra field
+    ssl_certfile: str = Field(None, env="SSL_CERTFILE")  # Optional extra field
+    ssl_keyfile: str = Field(None, env="SSL_KEYFILE")  # Optional extra field
 
     class Config:
         env_file = ".env"
+        extra = "allow"
 
     @property
     def supabase_key(self) -> str:
@@ -26,6 +30,7 @@ class GROQSettings(BaseSettings):
 
     class Config:
         env_file = ".env"
+        extra = "allow"  # Allow extra fields
 
     @property
     def groq_api_endpoint(self) -> str:
@@ -41,6 +46,7 @@ class RedisSettings(BaseSettings):
 
     class Config:
         env_file = ".env"
+        extra = "allow"  # Allow extra fields
 
     @property
     def redis_endpoint(self) -> str:
@@ -55,7 +61,8 @@ class AuthSettings(BaseSettings):
     E2B_API_KEY: SecretStr = Field(..., env="E2B_API_KEY")  # Required field
 
     class Config:
-        env_file = ".env"  # Optional: Use a .env file for local development
+        env_file = ".env"
+        extra = "allow"  # Allow extra fields
 
 
 class LogfireSettings(BaseSettings):
@@ -65,6 +72,7 @@ class LogfireSettings(BaseSettings):
 
     class Config:
         env_file = ".env"
+        extra = "allow"  # Allow extra fields
 
     @property
     def logfire_api_key(self) -> str:
@@ -115,7 +123,8 @@ class SimulationSettings(BaseSettings):
     """
 
     class Config:
-        env_file = ".env"  # Optional: Use a .env file for local development
+        env_file = ".env"
+        extra = "allow" 
 
     # ------------------------------------------------------
     # READ ONLY PROPERTIES - Make these attributes read-only

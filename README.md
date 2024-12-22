@@ -109,6 +109,9 @@ Create a `.env` file in the root directory and populate it with the necessary en
 doppler run --debug -- python3 run.py
 The application will be accessible at `http://0.0.0.0:8000`.
 
+Access Prometheus 'http://0.0.0.0:9090'
+Access Grafana 'http://0.0.0.0:3000'
+
 ---
 
 ## API Endpoints
