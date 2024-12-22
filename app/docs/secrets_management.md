@@ -1,4 +1,3 @@
-```markdown
 # Secrets Management System with Pydantic and Doppler
 
 This document explains how your application manages secrets securely using **Pydantic** for validation and **Doppler** for secrets management. The system is designed for both local development and production, ensuring security, validation, and ease of use.
@@ -191,4 +190,3 @@ REDIS_ENDPOINT
 ## Summary
 
 This system combines **Doppler** for secure secrets management with **Pydantic** for validation, ensuring your application configuration is secure, validated, and easy to maintain. It is designed for seamless operation across development, staging, and production environments.
-```
