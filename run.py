@@ -14,8 +14,11 @@ if settings.LOGFIRE.logfire_enabled:
         service_name="CogNetics Architect",
     )
 
+    # Keep the line below, use it for performance metrics.
+    logfire.instrument_system_metrics(base='full')
+
     # Install auto-tracing for the 'app' module (or any other modules you want to trace)
-    # logfire.install_auto_tracing(modules=['app'], min_duration=0.01, check_imported_modules='ignore')
+    logfire.install_auto_tracing(modules=['app'], min_duration=0.01, check_imported_modules='ignore')
 
     print("Logfire is enabled.")
 else:

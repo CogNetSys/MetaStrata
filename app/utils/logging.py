@@ -39,7 +39,7 @@ def setup_logging():
         )
         logfire_handler.setFormatter(logfire_formatter)
         logger.addHandler(logfire_handler)
-        logfire.configure(environment='local', service_name="CogNetics Architect")  # Configure Logfire
+        logfire.configure(environment='local', service_name="CogNetics Architect")
     else:
         print("Logfire is disabled.")
 
