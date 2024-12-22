@@ -1,16 +1,16 @@
 # Secrets Management System with Pydantic and Doppler
 
-This document explains how your application manages secrets securely using **Pydantic** for validation and **Doppler** for secrets management. The system is designed for both local development and production, ensuring security, validation, and ease of use.
+This document explains how CogNetics Architect manages secrets securely using **Pydantic** for validation and **Doppler** for secrets management. The system is designed for both local development and production, ensuring security, validation, and ease of use.
 
 ---
 
 ## Overview
 
 1. **Doppler:**  
-   Doppler serves as the central hub for managing secrets, injecting environment variables into your application at runtime.
+   Doppler serves as the central hub for managing secrets, injecting environment variables into CogNetics Architect at runtime.
    
 2. **Pydantic:**  
-   Pydantic is used to validate and load these environment variables into structured settings classes, ensuring that your application configuration is secure and type-safe.
+   Pydantic is used to validate and load these environment variables into structured settings classes, ensuring that CogNetics Architect's configuration is secure and type-safe.
 
 ---
 
@@ -96,7 +96,8 @@ This document explains how your application manages secrets securely using **Pyd
 ### **Example Settings Class**
 
 ```python
-from pydantic import BaseSettings, SecretStr, Field
+from pydantic import SecretStr, Field
+from pydantic_settings import BaseSettings
 
 class RedisSettings(BaseSettings):
     REDIS_ENDPOINT: str = Field(..., env="REDIS_ENDPOINT")  # Required

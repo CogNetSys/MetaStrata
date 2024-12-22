@@ -10,24 +10,45 @@ class DatabaseSettings(BaseSettings):
     SUPABASE_URL: str = Field(..., env="SUPABASE_URL")  # Required field
 
     class Config:
-        env_file = ".env"  # Optional: Use a .env file for local development
+        env_file = ".env"
 
+    @property
+    def supabase_key(self) -> str:
+        return self.SUPABASE_KEY.get_secret_value()
+
+    @property
+    def supabase_url(self) -> str:
+        return self.SUPABASE_URL
 
 class GROQSettings(BaseSettings):
     GROQ_API_ENDPOINT: str = Field("https://api.groq.com/openai/v1/chat/completions", env="GROQ_API_ENDPOINT")
     GROQ_API_KEY: SecretStr = Field(..., env="GROQ_API_KEY")  # Required field
 
     class Config:
-        env_file = ".env"  # Optional: Use a .env file for local development
+        env_file = ".env"
 
+    @property
+    def groq_api_endpoint(self) -> str:
+        return self.GROQ_API_ENDPOINT
+
+    @property
+    def groq_api_key(self) -> str:
+        return self.GROQ_API_KEY.get_secret_value()
 
 class RedisSettings(BaseSettings):
     REDIS_ENDPOINT: str = Field(..., env="REDIS_ENDPOINT")  # Required field
     REDIS_PASSWORD: SecretStr = Field(..., env="REDIS_PASSWORD")  # Required field
 
     class Config:
-        env_file = ".env"  # Optional: Use a .env file for local development
+        env_file = ".env"
 
+    @property
+    def redis_endpoint(self) -> str:
+        return self.REDIS_ENDPOINT
+
+    @property
+    def redis_password(self) -> str:
+        return self.REDIS_PASSWORD.get_secret_value()
 
 class AuthSettings(BaseSettings):
     AUTH_TOKEN: SecretStr = Field(..., env="AUTH_TOKEN")  # Required field
@@ -39,11 +60,23 @@ class AuthSettings(BaseSettings):
 
 class LogfireSettings(BaseSettings):
     LOGFIRE_API_KEY: SecretStr = Field(..., env="LOGFIRE_API_KEY")  # Required field
-    LOGFIRE_ENDPOINT: str = Field("https://logfire.pydantic.dev", env="LOGFIRE_ENDPOINT")  # Default value
-    LOGFIRE_ENABLED: bool = Field(False, env="LOGFIRE_ENABLED")  # Default: False
+    LOGFIRE_ENDPOINT: str = Field("https://logfire.pydantic.dev", env="LOGFIRE_ENDPOINT")
+    LOGFIRE_ENABLED: bool = Field(False, env="LOGFIRE_ENABLED")
 
     class Config:
-        env_file = ".env"  # Optional: Use a .env file for local development
+        env_file = ".env"
+
+    @property
+    def logfire_api_key(self) -> str:
+        return self.LOGFIRE_API_KEY.get_secret_value()
+
+    @property
+    def logfire_endpoint(self) -> str:
+        return self.LOGFIRE_ENDPOINT
+
+    @property
+    def logfire_enabled(self) -> bool:
+        return self.LOGFIRE_ENABLED
 
 
 class SimulationSettings(BaseSettings):
