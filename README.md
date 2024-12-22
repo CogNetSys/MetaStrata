@@ -106,7 +106,7 @@ Create a `.env` file in the root directory and populate it with the necessary en
 
 ### Run the Application
 
-python run.py  
+doppler run --debug -- python3 run.py
 The application will be accessible at `http://0.0.0.0:8000`.
 
 ---

@@ -16,6 +16,3 @@ MetaStrata-venv/
 
 # Vercel
 .vercel
-
-# Environment variables
-.env

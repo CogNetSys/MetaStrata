@@ -1,62 +1,47 @@
-from pydantic import SecretStr, Field
-from pydantic_settings import BaseSettings
+# /app/config.py
+
+import os
+from dotenv import load_dotenv
+from pydantic import SecretStr
+
+load_dotenv()
 
 # --------------------------------------------------------
-# SENSITIVE SETTINGS - Managed via Doppler
+# MODIFIABLE PROPERTIES - These attributes are modifiable
 # --------------------------------------------------------
+    
+class DatabaseSettings:
+    SUPABASE_KEY: SecretStr = SecretStr(os.getenv("SUPABASE_KEY"))
+    SUPABASE_URL: str = os.getenv("SUPABASE_URL")
 
-class DatabaseSettings(BaseSettings):
-    SUPABASE_KEY: SecretStr = Field(..., env="SUPABASE_KEY")  # Required field
-    SUPABASE_URL: str = Field(..., env="SUPABASE_URL")  # Required field
+class GROQSettings:
+    GROQ_API_ENDPOINT: str = os.getenv("GROQ_API_ENDPOINT", "https://api.groq.com/openai/v1/chat/completions")
+    GROQ_API_KEY: SecretStr = SecretStr(os.getenv("GROQ_API_KEY"))
 
-    class Config:
-        env_file = ".env"  # Optional: Use a .env file for local development
+class RedisSettings:
+    REDIS_ENDPOINT: str = os.getenv("REDIS_ENDPOINT")
+    REDIS_PASSWORD: SecretStr = SecretStr(os.getenv("REDIS_PASSWORD"))
 
+class AuthSettings:
+    AUTH_TOKEN: SecretStr = SecretStr(os.getenv("AUTH_TOKEN"))
+    E2B_API_KEY: SecretStr = SecretStr(os.getenv("E2B_API_KEY"))
 
-class GROQSettings(BaseSettings):
-    GROQ_API_ENDPOINT: str = Field("https://api.groq.com/openai/v1/chat/completions", env="GROQ_API_ENDPOINT")
-    GROQ_API_KEY: SecretStr = Field(..., env="GROQ_API_KEY")  # Required field
+class LogfireSettings:
+    LOGFIRE_API_KEY: SecretStr = SecretStr(os.getenv("LOGFIRE_API_KEY"))
+    LOGFIRE_ENDPOINT: str = os.getenv("LOGFIRE_ENDPOINT", "https://logfire.pydantic.dev")
+    LOGFIRE_ENABLED: bool = os.getenv("LOGFIRE_ENABLED", "false").lower() == "true"
 
-    class Config:
-        env_file = ".env"  # Optional: Use a .env file for local development
-
-
-class RedisSettings(BaseSettings):
-    REDIS_ENDPOINT: str = Field(..., env="REDIS_ENDPOINT")  # Required field
-    REDIS_PASSWORD: SecretStr = Field(..., env="REDIS_PASSWORD")  # Required field
-
-    class Config:
-        env_file = ".env"  # Optional: Use a .env file for local development
-
-
-class AuthSettings(BaseSettings):
-    AUTH_TOKEN: SecretStr = Field(..., env="AUTH_TOKEN")  # Required field
-    E2B_API_KEY: SecretStr = Field(..., env="E2B_API_KEY")  # Required field
-
-    class Config:
-        env_file = ".env"  # Optional: Use a .env file for local development
-
-
-class LogfireSettings(BaseSettings):
-    LOGFIRE_API_KEY: SecretStr = Field(..., env="LOGFIRE_API_KEY")  # Required field
-    LOGFIRE_ENDPOINT: str = Field("https://logfire.pydantic.dev", env="LOGFIRE_ENDPOINT")  # Default value
-    LOGFIRE_ENABLED: bool = Field(False, env="LOGFIRE_ENABLED")  # Default: False
-
-    class Config:
-        env_file = ".env"  # Optional: Use a .env file for local development
-
-
-class SimulationSettings(BaseSettings):
-    CHEBYSHEV_DISTANCE: float = Field(5.0, env="CHEBYSHEV_DISTANCE")  # Default: 5.0
-    GRID_SIZE: int = Field(15, env="GRID_SIZE")  # Default: 15
-    LLM_MAX_TOKENS: int = Field(2048, env="LLM_MAX_TOKENS")  # Default: 2048
-    LLM_MODEL: str = Field("llama-3.1-8b-instant", env="LLM_MODEL")  # Default value
-    LLM_TEMPERATURE: float = Field(0.7, env="LLM_TEMPERATURE")  # Default: 0.7
-    LOG_LEVEL: str = Field("DEBUG", env="LOG_LEVEL")  # Default: DEBUG
-    MAX_CONCURRENT_REQUESTS: int = Field(5, env="MAX_CONCURRENT_REQUESTS")  # Default: 5
-    MAX_STEPS: int = Field(10, env="MAX_STEPS")  # Default: 10
-    NUM_ENTITIES: int = Field(3, env="NUM_ENTITIES")  # Default: 3
-    REQUEST_DELAY: float = Field(2.3, env="REQUEST_DELAY")  # Default: 2.3
+class SimulationSettings:
+    CHEBYSHEV_DISTANCE: float = float(os.getenv("CHEBYSHEV_DISTANCE", 5.0))  # Default: 5.0
+    GRID_SIZE: int = int(os.getenv("GRID_SIZE", 15))  # Default: 15
+    LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", 2048))  # Default: 2048
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")  # Default: "llama-3.3-70b-versatile"
+    LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", 0.7))  # Default: 0.7
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "DEBUG")  # Default: "DEBUG"
+    MAX_CONCURRENT_REQUESTS: int = int(os.getenv("MAX_CONCURRENT_REQUESTS", 5))  # Default: 5
+    MAX_STEPS: int = int(os.getenv("MAX_STEPS", 10))  # Default: 10
+    NUM_ENTITIES: int = int(os.getenv("NUM_ENTITIES", 3))  # Default: 3
+    REQUEST_DELAY: float = float(os.getenv("REQUEST_DELAY", 2.3))  # Default: 1.2
 
     DEFAULT_MESSAGE_GENERATION_PROMPT: str = """
     You are lifeform{entityId} at position ({x}, {y}). {grid_description} 
@@ -80,9 +65,6 @@ class SimulationSettings(BaseSettings):
     Based on the above, choose your next move. Respond with only one of the following options, and nothing else: "x+1", "x-1", "y+1", "y-1", or "stay".
     Do not provide any explanation or additional text.
     """
-
-    class Config:
-        env_file = ".env"  # Optional: Use a .env file for local development
 
     # ------------------------------------------------------
     # READ ONLY PROPERTIES - Make these attributes read-only
@@ -143,23 +125,19 @@ class SimulationSettings(BaseSettings):
     @property
     def default_movement_generation_prompt(self) -> str:
         return self.DEFAULT_MOVEMENT_GENERATION_PROMPT
-    
 
 class Settings:
-    def __init__(self):
-        self.DATABASE = DatabaseSettings()
-        self.GROQ = GROQSettings()
-        self.REDIS = RedisSettings()
-        self.AUTH = AuthSettings()
-        self.LOGFIRE = LogfireSettings()
-        self.SIMULATION = SimulationSettings()
+    GROQ: GROQSettings = GROQSettings()
+    AUTH: AuthSettings = AuthSettings()
+    DATABASE: DatabaseSettings = DatabaseSettings()
+    LOGFIRE: LogfireSettings = LogfireSettings()
+    REDIS: RedisSettings = RedisSettings()
+    SIMULATION: SimulationSettings = SimulationSettings()
 
-
-# Global settings instance
+# Create a global settings object
 settings = Settings()
 
-
-# Utility function
+# Leave this here to prevent circular imports please, I knkow it's not the best place. Whatever.
 def calculate_chebyshev_distance(x1: int, y1: int, x2: int, y2: int) -> int:
     """
     Calculate the Chebyshev distance between two points.
@@ -171,6 +149,6 @@ def calculate_chebyshev_distance(x1: int, y1: int, x2: int, y2: int) -> int:
         y2 (int): Y-coordinate of the second point.
 
     Returns:
-        int: The Chebyshev distance between two points.
+        int: The Chebyshev distance between the two points.
     """
     return max(abs(x1 - x2), abs(y1 - y2))

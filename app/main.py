@@ -72,18 +72,6 @@ console_formatter = logging.Formatter(
 console_handler.setFormatter(console_formatter)
 logger.addHandler(console_handler)
 
-# Initialize the custom logger for patched logs
-logfire_debug_logger = logging.getLogger("logfire_debug")
-logfire_debug_logger.setLevel(logging.DEBUG)
-logfire_debug_logger.propagate = False  # Prevent propagation to root logger
-logfire_debug_handler = logging.StreamHandler()  # Log to the console
-logfire_debug_formatter = logging.Formatter(
-    '{"timestamp": "%(asctime)s", "level": "%(levelname)s", "message": "%(message)s"}'
-)
-logfire_debug_handler.setFormatter(logfire_debug_formatter)
-logfire_debug_logger.addHandler(logfire_debug_handler)
-
-
 # ----------------------------------------------
 # LIFESPAN SECTION
 # ----------------------------------------------
@@ -95,11 +83,6 @@ async def lifespan(app: FastAPI):
     if settings.LOGFIRE.LOGFIRE_ENABLED:
         logfire.info('Starting application lifespan...')
     
-    # Loguru setup can be added here if needed
-    setup_loguru()
-    if settings.LOGFIRE.LOGFIRE_ENABLED:
-        logfire.debug("Loguru initialized.")
-
     try:
         # Startup logic
         if settings.LOGFIRE.LOGFIRE_ENABLED:
