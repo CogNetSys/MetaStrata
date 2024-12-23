@@ -27,16 +27,6 @@ def setup_loguru():
         diagnose=True
     )
 
-    # Loguru handler for libraries (like uvicorn/fastapi) without text/record
-    logger.add(
-        "logs/other_logs.log",
-        format="{message}",  # Very simple format
-        rotation="10 MB",
-        retention="10 days",
-        compression="zip",
-        enqueue=True
-    )
-
     # Log to console
     logger.add(sys.stdout, format="{time} {level} {message}", level="DEBUG")
 
@@ -46,8 +36,3 @@ def setup_loguru():
     # Prevent uvicorn and fastapi logs from being handled by the root logger (and thus InterceptHandler)
     logging.getLogger("fastapi").propagate = False
     logging.getLogger("uvicorn").propagate = False
-
-    # Optional: Redirect specific loggers to the other_logs.log if needed
-    # For example, if you want a specific module to be logged in the standard format:
-    # logging.getLogger("my_module").propagate = False
-    # logging.getLogger("my_module").handlers = [logging.StreamHandler(sys.stdout)] # Or a FileHandler to other_logs.log
