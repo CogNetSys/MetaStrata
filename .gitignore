@@ -16,3 +16,6 @@ MetaStrata-venv/
 
 # Vercel
 .vercel
+
+# Binaries
+.bin
