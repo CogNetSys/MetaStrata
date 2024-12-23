@@ -26,7 +26,7 @@ def setup_loguru():
         backtrace=True,
         diagnose=True
     )
-
+ 
     # Log to console
     logger.add(sys.stdout, format="{time} {level} {message}", level="DEBUG")
 
