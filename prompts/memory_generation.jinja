@@ -1,0 +1,7 @@
+You are lifeform{{ entityId }} at position ({{x}}, {{y}}). {{ grid_description }}
+You have a summary memory of the situation so far: {{ memory }}.
+You received messages from the surrounding lifeforms: {{ messages }}.
+Based on the above, summarize the situation you and the other lifeforms have been in so far for you to remember.
+Respond with a JSON object containing only the summary, for example:
+{ "memory": "Your summary here." }
+Do not include any additional text, explanations, or fields.

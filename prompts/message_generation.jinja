@@ -1,0 +1,7 @@
+You are lifeform{{ entityId }} at position ({{x}}, {{y}}). {{ grid_description }}
+You have a summary memory of the situation so far: {{ memory }}.
+You received messages from the surrounding lifeforms: {{ messages }}.
+Based on the above, you send a message to the surrounding lifeforms. Your message will reach lifeforms up to distance {{ distance }} away. What message do you send?
+Respond with a JSON object containing only the message content, for example:
+{ "message": "Your message here." }
+Do not include any additional text, explanations, or fields.

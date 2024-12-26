@@ -1,6 +1,6 @@
 # /app/endpoints/customization.py
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 import logfire
 from app.config import settings
 from app.utils.models import PromptSettings
@@ -26,26 +26,36 @@ async def get_settings():
 
 @router.post("/settings", tags=["Customization"])
 async def set_settings(simulation_settings: dict):
-    settings.SIMULATION.GRID_SIZE = simulation_settings["grid_size"]
-    settings.SIMULATION.NUM_ENTITIES = simulation_settings["num_entities"]
-    settings.SIMULATION.MAX_STEPS = simulation_settings["max_steps"]
-    settings.SIMULATION.CHEBYSHEV_DISTANCE = simulation_settings["chebyshev_distance"]
-    settings.SIMULATION.LLM_MODEL = simulation_settings["llm_model"]
-    settings.SIMULATION.LLM_MAX_TOKENS = simulation_settings["llm_max_tokens"]
-    settings.SIMULATION.LLM_TEMPERATURE = simulation_settings["llm_temperature"]
-    settings.SIMULATION.REQUEST_DELAY = simulation_settings["request_delay"]
-    settings.SIMULATION.MAX_CONCURRENT_REQUESTS = simulation_settings["max_concurrent_requests"]
+    try:
+        # Update settings in the current instance
+        for key, value in simulation_settings.items():
+            if hasattr(settings.SIMULATION, key.upper()):
+                setattr(settings.SIMULATION, key.upper(), value)
 
-    if settings.LOGFIRE.LOGFIRE_ENABLED:
-        logfire.info("Simulation settings updated.")
-    return simulation_settings
+        # Save the updated settings to settings.yaml
+        settings.SIMULATION.save_settings()
+
+        if settings.LOGFIRE.LOGFIRE_ENABLED:
+            logfire.info("Simulation settings updated and saved.")
+        return {"message": "Simulation settings updated successfully."}
+    except Exception as e:
+        if settings.LOGFIRE.LOGFIRE_ENABLED:
+            logfire.error(f"Error updating settings: {e}")
+        raise HTTPException(status_code=500, detail=f"Error updating settings: {e}")
 
 @router.get("/prompts", tags=["Customization"])
 async def get_prompts():
+    # Render the default prompts with empty values
     prompt_settings = {
-        "default_message_generation_prompt": settings.SIMULATION.DEFAULT_MESSAGE_GENERATION_PROMPT,
-        "default_memory_generation_prompt": settings.SIMULATION.DEFAULT_MEMORY_GENERATION_PROMPT,
-        "default_movement_generation_prompt": settings.SIMULATION.DEFAULT_MOVEMENT_GENERATION_PROMPT,
+        "default_message_generation_prompt": settings.SIMULATION.DEFAULT_MESSAGE_GENERATION_PROMPT.render(
+            entityId="", x=0, y=0, grid_description="", memory="", messages="", distance=0
+        ),
+        "default_memory_generation_prompt": settings.SIMULATION.DEFAULT_MEMORY_GENERATION_PROMPT.render(
+            entityId="", x=0, y=0, grid_description="", memory="", messages=""
+        ),
+        "default_movement_generation_prompt": settings.SIMULATION.DEFAULT_MOVEMENT_GENERATION_PROMPT.render(
+            entityId="", x=0, y=0, grid_description="", memory="", messages=""
+        ),
     }
     if settings.LOGFIRE.LOGFIRE_ENABLED:
         logfire.debug("Prompt templates retrieved.")
