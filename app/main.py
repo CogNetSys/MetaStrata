@@ -5,6 +5,7 @@ from app.config import settings
 from app.utils.logging import setup_logging
 from app.utils.database import redis
 from app.endpoints import router as endpoints_router
+from app.endpoints.simulation import client as httpx_client
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,6 +41,7 @@ async def lifespan(app: FastAPI):
             logfire.info('Shutting down application...')
         stop_signal = True  # Ensure simulation stops if running
         await redis.close()
+        await httpx_client.aclose() # Close the httpx client
         if settings.LOGFIRE.LOGFIRE_ENABLED:
             logfire.info('Redis connection closed.')
 

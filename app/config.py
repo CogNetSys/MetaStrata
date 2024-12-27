@@ -1,5 +1,11 @@
+# /app/utils/config.py:
+
+import os
+import yaml
+from typing import ClassVar, Optional
 from pydantic import SecretStr, Field
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 # --------------------------------------------------------
 # SENSITIVE SETTINGS - Managed via Doppler
@@ -9,8 +15,8 @@ class DatabaseSettings(BaseSettings):
     SUPABASE_KEY: SecretStr = Field(..., env="SUPABASE_KEY")
     SUPABASE_URL: str = Field(..., env="SUPABASE_URL")
     use_ssl: bool = Field(False, env="USE_SSL")  # Optional extra field
-    ssl_certfile: str = Field(None, env="SSL_CERTFILE")  # Optional extra field
-    ssl_keyfile: str = Field(None, env="SSL_KEYFILE")  # Optional extra field
+    ssl_certfile: Optional[str] = Field(None, env="SSL_CERTFILE")  # Optional extra field
+    ssl_keyfile: Optional[str] = Field(None, env="SSL_KEYFILE")  # Optional extra field
 
     class Config:
         env_file = ".env"
@@ -64,11 +70,10 @@ class AuthSettings(BaseSettings):
         env_file = ".env"
         extra = "allow"  # Allow extra fields
 
-
 class LogfireSettings(BaseSettings):
     LOGFIRE_API_KEY: SecretStr = Field(..., env="LOGFIRE_API_KEY")  # Required field
     LOGFIRE_ENDPOINT: str = Field("https://logfire.pydantic.dev", env="LOGFIRE_ENDPOINT")
-    LOGFIRE_ENABLED: bool = Field(False, env="LOGFIRE_ENABLED")
+    LOGFIRE_ENABLED: bool = Field(True, env="LOGFIRE_ENABLED")
 
     class Config:
         env_file = ".env"
@@ -86,7 +91,6 @@ class LogfireSettings(BaseSettings):
     def logfire_enabled(self) -> bool:
         return self.LOGFIRE_ENABLED
 
-
 class SimulationSettings(BaseSettings):
     CHEBYSHEV_DISTANCE: float = Field(5.0, env="CHEBYSHEV_DISTANCE")  # Default: 5.0
     GRID_SIZE: int = Field(15, env="GRID_SIZE")  # Default: 15
@@ -99,32 +103,51 @@ class SimulationSettings(BaseSettings):
     NUM_ENTITIES: int = Field(3, env="NUM_ENTITIES")  # Default: 3
     REQUEST_DELAY: float = Field(2.3, env="REQUEST_DELAY")  # Default: 2.3
 
-    DEFAULT_MESSAGE_GENERATION_PROMPT: str = """
-    You are lifeform{entityId} at position ({x}, {y}). {grid_description} 
-    You have a summary memory of the situation so far: {memory}. 
-    You received messages from the surrounding lifeforms: {messages}. 
-    Based on the above, you send a message to the surrounding lifeforms. Your message will reach lifeforms up to distance {distance} away. What message do you send?
-    Respond with only the message content, and nothing else.
-    """
+    # Jinja2 environment for prompts - annotated with ClassVar
+    prompt_env: ClassVar[Environment] = Environment(
+        loader=FileSystemLoader("prompts"),
+        autoescape=select_autoescape(['html', 'xml'])
+    )
 
-    DEFAULT_MEMORY_GENERATION_PROMPT: str = """
-    You are lifeform{entityId} at position ({x}, {y}). {grid_description} 
-    You have a summary memory of the situation so far: {memory}. 
-    You received messages from the surrounding lifeforms: {messages}. 
-    Based on the above, summarize the situation you and the other lifeforms have been in so far for you to remember.
-    Respond with only the summary, and nothing else.
-    """
+    # Load templates without rendering
+    DEFAULT_MESSAGE_GENERATION_PROMPT: ClassVar[Environment.get_template] = prompt_env.get_template("message_generation.jinja")
+    DEFAULT_MEMORY_GENERATION_PROMPT: ClassVar[Environment.get_template] = prompt_env.get_template("memory_generation.jinja")
+    DEFAULT_MOVEMENT_GENERATION_PROMPT: ClassVar[Environment.get_template] = prompt_env.get_template("movement_generation.jinja")
 
-    DEFAULT_MOVEMENT_GENERATION_PROMPT: str = """
-    You are lifeform{entityId} at position ({x}, {y}). {grid_description} 
-    You have a summary memory of the situation so far: {memory}.
-    Based on the above, choose your next move. Respond with only one of the following options, and nothing else: "x+1", "x-1", "y+1", "y-1", or "stay".
-    Do not provide any explanation or additional text.
-    """
+    # File to store settings
+    SETTINGS_FILE: ClassVar[str] = "settings.yaml"
 
-    class Config:
-        env_file = ".env"
-        extra = "allow" 
+    model_config = SettingsConfigDict(env_file=".env", extra='allow')
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        self.load_settings()
+
+    def load_settings(self):
+        """Loads settings from a YAML file if it exists."""
+        if os.path.exists(self.SETTINGS_FILE):
+            with open(self.SETTINGS_FILE, "r") as f:
+                try:
+                    settings_data = yaml.safe_load(f)
+                    # Update settings from the YAML file
+                    for key, value in settings_data.get("simulation", {}).items():
+                        if hasattr(self, key.upper()):
+                            setattr(self, key.upper(), value)
+                except yaml.YAMLError:
+                    print(f"Error: {self.SETTINGS_FILE} is not a valid YAML file. Using default or environment settings.")
+
+    def save_settings(self):
+        """Saves the current settings to a YAML file."""
+        settings_data = {"simulation": {}}
+        for key in self.model_fields.keys():
+            # Convert to uppercase for consistency with your code
+            upper_key = key.upper()
+            if hasattr(self, upper_key):
+                # Get the value of the uppercase attribute
+                settings_data["simulation"][key] = getattr(self, upper_key)
+
+        with open(self.SETTINGS_FILE, "w") as f:
+            yaml.dump(settings_data, f, indent=4)
 
     # ------------------------------------------------------
     # READ ONLY PROPERTIES - Make these attributes read-only
@@ -173,18 +196,6 @@ class SimulationSettings(BaseSettings):
     @property
     def log_level(self) -> str:
         return self.LOG_LEVEL
-
-    @property
-    def default_memory_generation_prompt(self) -> str:
-        return self.DEFAULT_MEMORY_GENERATION_PROMPT
-
-    @property
-    def default_message_generation_prompt(self) -> str:
-        return self.DEFAULT_MESSAGE_GENERATION_PROMPT
-
-    @property
-    def default_movement_generation_prompt(self) -> str:
-        return self.DEFAULT_MOVEMENT_GENERATION_PROMPT
     
 
 class Settings:
@@ -196,10 +207,8 @@ class Settings:
         self.LOGFIRE = LogfireSettings()
         self.SIMULATION = SimulationSettings()
 
-
 # Global settings instance
 settings = Settings()
-
 
 # Utility function
 def calculate_chebyshev_distance(x1: int, y1: int, x2: int, y2: int) -> int:

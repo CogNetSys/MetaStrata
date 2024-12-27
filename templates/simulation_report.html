@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Simulation Report - Step {{ step_number }}</title>
+</head>
+<body>
+    <h1>Simulation Report - Step {{ step_number }}</h1>
+
+    <h2>Entities:</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Name</th>
+                <th>Position (x, y)</th>
+                <th>Memory</th>
+                <th>Last Message</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for entity in entities %}
+            <tr>
+                <td>{{ entity.id }}</td>
+                <td>{{ entity.name }}</td>
+                <td>({{ entity.x }}, {{ entity.y }})</td>
+                <td>{{ entity.memory }}</td>
+                <td>{{ entity.message }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</body>
+</html>
