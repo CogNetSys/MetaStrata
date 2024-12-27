@@ -24,6 +24,9 @@ env = Environment(loader=FileSystemLoader("templates"))  # Load templates from t
 
 chebyshev_distance = settings.SIMULATION.CHEBYSHEV_DISTANCE
 
+# Connection Pooling client for HTTPX requests
+client = httpx.AsyncClient(timeout=10.0)
+
 # Semaphore for throttling concurrent requests
 global_request_semaphore = asyncio.Semaphore(settings.SIMULATION.MAX_CONCURRENT_REQUESTS)
 
@@ -69,7 +72,7 @@ async def send_llm_request(prompt, entity_id=None, max_retries=3, base_delay=2) 
 
         for attempt in range(max_retries + 1):
             try:
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(timeout=10.0) as client:
                     response = await client.post(
                         f"{settings.GROQ.GROQ_API_ENDPOINT}",
                         headers=headers,
@@ -127,6 +130,8 @@ async def send_llm_request(prompt, entity_id=None, max_retries=3, base_delay=2) 
                 return validated_response
 
             except httpx.HTTPStatusError as e:
+                if settings.LOGFIRE.LOGFIRE_ENABLED:
+                    logfire.error(f"HTTP error during LLM request: {e}, Response: {e.response.text}")
                 status = e.response.status_code
                 if status in [429, 503]:
                     if attempt >= max_retries:
@@ -145,8 +150,6 @@ async def send_llm_request(prompt, entity_id=None, max_retries=3, base_delay=2) 
                         logfire.error(f"Received {status} error. Retrying in {delay} seconds...")
                     await asyncio.sleep(delay)
                 else:
-                    if settings.LOGFIRE.LOGFIRE_ENABLED:
-                        logfire.error(f"HTTP error during LLM request: {e}")
                     return LLMRequestError(error=f"HTTP error during LLM request: {str(e)}")
 
             except Exception as e:
@@ -155,7 +158,7 @@ async def send_llm_request(prompt, entity_id=None, max_retries=3, base_delay=2) 
                 return LLMRequestError(error=f"Error during LLM request: {str(e)}")
 
         return LLMRequestError(error="Failed to get a valid response from LLM.")
-
+    
 # -------------------------------------------------------------
 # SIMULATION ENDPOINTS SECTION
 # -------------------------------------------------------------
@@ -252,7 +255,7 @@ async def perform_steps(request: StepRequest):
                 if settings.LOGFIRE.LOGFIRE_ENABLED:
                     logfire.error(f"Error generating message for entity {entities[i]['id']}: {response.error}")
 
-        print(f"Messages after message generation: {messages}")
+        # --- End of Message Generation ---
 
         # Update memory for all entities concurrently
         memory_tasks = [
@@ -263,7 +266,7 @@ async def perform_steps(request: StepRequest):
                     y=entity["y"],
                     grid_description=settings.SIMULATION.grid_description,
                     memory=entity["memory"],
-                    messages="\n".join(messages.get(entity["id"], [])),
+                    messages="\n".join(messages.get(entity["id"], [])),  # Pass all collected messages here
                     distance=settings.SIMULATION.CHEBYSHEV_DISTANCE
                 ),
                 entity_id=entity["id"]
@@ -290,7 +293,7 @@ async def perform_steps(request: StepRequest):
                     y=entity["y"],
                     grid_description=settings.SIMULATION.grid_description,
                     memory=entity["memory"],
-                    messages="\n".join(messages.get(entity["id"], [])),
+                    messages="\n".join(messages.get(entity["id"], [])),  # Pass all collected messages here
                     distance=settings.SIMULATION.CHEBYSHEV_DISTANCE
                 ),
                 entity_id=entity["id"]
@@ -306,8 +309,6 @@ async def perform_steps(request: StepRequest):
             elif isinstance(response, LLMRequestError):
                 if settings.LOGFIRE.LOGFIRE_ENABLED:
                     logfire.error(f"Error generating movement for entity {entities[i]['id']}: {response.error}")
-
-        print(f"Movements after movement determination: {movements}")
 
         # Execute movements for all entities
         for entity in entities:
@@ -328,9 +329,7 @@ async def perform_steps(request: StepRequest):
                     log_message = f"Entity {entity['id']} moved from ({entity['x']}, {entity['y']}) to ({new_x}, {new_y}) with action '{movement}'."
                     if settings.LOGFIRE.LOGFIRE_ENABLED:
                         logfire.info(log_message)
-                    print(f"Before updating Redis: Entity {entity['id']} position: ({new_x}, {new_y})")
                     await redis.hset(f"entity:{entity['id']}", mapping={"x": new_x, "y": new_y})
-                    # print(f"After updating Redis: Entity {entity['id']} position in Redis: {await redis.hgetall(f'entity:{entity["id"]}')}")
                     # Update entity's position in the entities list
                     entity["x"], entity["y"] = new_x, new_y
                 elif movement == "stay":
@@ -341,7 +340,7 @@ async def perform_steps(request: StepRequest):
                 if settings.LOGFIRE.LOGFIRE_ENABLED:
                     logfire.error(f"Invalid or missing movement command for Entity {entity['id']}.")
 
-        # Generate Report
+        # Generate Report - Use Instructor and Jinja2 templace to create a report.
         if settings.LOGFIRE.LOGFIRE_ENABLED:
             logfire.info(f"Generating report for step {step + 1}")
 
@@ -371,7 +370,7 @@ async def perform_steps(request: StepRequest):
     if settings.LOGFIRE.LOGFIRE_ENABLED:
         logfire.info(f"Completed {request.steps} step(s).")
     return JSONResponse({"status": f"Performed {request.steps} step(s).", "report": report_filename})
-  
+
 @router.post("/stop", tags=["Simulation"])
 async def stop_simulation():
     global stop_signal

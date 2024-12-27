@@ -2,7 +2,7 @@
 
 import os
 import yaml
-from typing import ClassVar
+from typing import ClassVar, Optional
 from pydantic import SecretStr, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -15,8 +15,8 @@ class DatabaseSettings(BaseSettings):
     SUPABASE_KEY: SecretStr = Field(..., env="SUPABASE_KEY")
     SUPABASE_URL: str = Field(..., env="SUPABASE_URL")
     use_ssl: bool = Field(False, env="USE_SSL")  # Optional extra field
-    ssl_certfile: str = Field(None, env="SSL_CERTFILE")  # Optional extra field
-    ssl_keyfile: str = Field(None, env="SSL_KEYFILE")  # Optional extra field
+    ssl_certfile: Optional[str] = Field(None, env="SSL_CERTFILE")  # Optional extra field
+    ssl_keyfile: Optional[str] = Field(None, env="SSL_KEYFILE")  # Optional extra field
 
     class Config:
         env_file = ".env"

@@ -19,3 +19,9 @@ MetaStrata-venv/
 
 # Binaries
 .bin
+
+# Ignore settings.yaml
+settings.yaml
+
+# simulation report
+simulation_report_*.html
