@@ -70,7 +70,7 @@ class LogfireHandler(logging.Handler):
     def __init__(self, api_key: str):
         super().__init__()
         self.api_key = api_key
-        self.endpoint = "https://logfire.pydantic.dev/cognetsys/cognetics-architect/logs"  # Replace with actual Logfire endpoint
+        self.endpoint = endpoint
 
     def emit(self, record):
         log_entry = self.format(record)

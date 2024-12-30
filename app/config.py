@@ -71,9 +71,9 @@ class AuthSettings(BaseSettings):
         extra = "allow"  # Allow extra fields
 
 class LogfireSettings(BaseSettings):
-    LOGFIRE_API_KEY: SecretStr = Field(..., env="LOGFIRE_API_KEY")  # Required field
-    LOGFIRE_ENDPOINT: str = Field("https://logfire.pydantic.dev", env="LOGFIRE_ENDPOINT")
-    LOGFIRE_ENABLED: bool = Field(True, env="LOGFIRE_ENABLED")
+    LOGFIRE_API_KEY: SecretStr = Field(..., env="E_AESTHELSGARD_LOGFIRE_API_KEY")  # Required field
+    LOGFIRE_ENDPOINT: str = Field("https://logfire.pydantic.dev", env="E_AESTHELSGARD_LOGFIRE_ENDPOINT")
+    LOGFIRE_ENABLED: bool = Field(True, env="E_AESTHELSGARD_LOGFIRE_ENABLED")
 
     class Config:
         env_file = ".env"
@@ -209,6 +209,10 @@ class Settings:
 
 # Global settings instance
 settings = Settings()
+
+# api_key=settings.LOGFIRE.LOGFIRE_API_KEY,
+# endpoint=settings.LOGFIRE.LOGFIRE_ENDPOINT
+
 
 # Utility function
 def calculate_chebyshev_distance(x1: int, y1: int, x2: int, y2: int) -> int:
